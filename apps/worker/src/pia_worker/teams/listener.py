@@ -203,61 +203,67 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
         page.wait_for_timeout(8000)
 
         # Shortener/deep links land on a launcher: "Join your Teams meeting —
-        # Continue on this browser | Join on the Teams app". The web client is
-        # what the listener drives.
+        # Continue on this browser | Join on the Teams app". The click may open
+        # the meeting in-page OR in a new tab — both are handled by iterating
+        # every open page in the join state machine below.
         for label in ("Continue on this browser",
                       "Continue on this device", "Fortfahren im Browser"):
             try:
-                with context.expect_page(timeout=6000) as popup_info:
-                    page.get_by_text(label, exact=False).first.click(timeout=3000)
-                # "Continue on this browser" opens the meeting in a NEW TAB —
-                # the launcher page stays behind. Switch to the new tab.
-                page = popup_info.value
-                logger.info("launcher_continue_clicked", new_tab=True)
-                page.wait_for_timeout(6000)
+                page.get_by_text(label, exact=False).first.click(timeout=3000)
+                logger.info("launcher_continue_clicked", label=label)
+                page.wait_for_timeout(5000)
                 break
             except Exception:  # noqa: BLE001 — direct links skip the launcher
                 continue
 
-        # Join state machine (60s): the pre-join flow differs by link type —
-        # work links go straight to toggles+Join; personal links (teams.live)
-        # use the anonymous guest flow: a NAME ENTRY field appears first, and
-        # "Join now" only enables once a name is filled.
+        # Join state machine (90s): poll EVERY open page — the pre-join flow
+        # differs by link type: work links go straight to toggles+Join;
+        # personal links (teams.live) use the anonymous guest flow, where a
+        # NAME field appears first and "Join now" enables only once filled.
         joined = False
-        name_filled = False
-        join_deadline = time.time() + 60
-        while time.time() < join_deadline and not joined:
-            # mic/camera off whenever the toggles are present
-            for toggle_label in ("camera", "mic", "Caméra", "Mikrofon"):
-                with contextlib.suppress(Exception):
-                    page.get_by_label(toggle_label, exact=False).first.click(
-                        timeout=800)
-            # guest name entry (personal links)
-            if not name_filled:
-                for name_sel in ("input[placeholder*='name' i]",
-                                 "input[aria-label*='name' i]",
-                                 "input[type='text']"):
+        joined_page = page
+        name_filled_pages: set[int] = set()
+        join_deadline = time.time() + 90
+        while time.time() < join_deadline and joined_page is page and not joined:
+            for candidate in context.pages:
+                if "/dl/launcher" in candidate.url:
+                    continue  # the chooser itself — nothing to join here
+                # mic/camera off whenever the toggles are present
+                for toggle_label in ("camera", "mic", "Caméra", "Mikrofon"):
+                    with contextlib.suppress(Exception):
+                        candidate.get_by_label(toggle_label, exact=False).first.click(
+                            timeout=800)
+                # guest name entry (personal links)
+                if id(candidate) not in name_filled_pages:
+                    for name_sel in ("input[placeholder*='name' i]",
+                                     "input[aria-label*='name' i]",
+                                     "input[type='text']"):
+                        try:
+                            box = candidate.locator(name_sel).first
+                            if box.is_visible(timeout=500):
+                                box.fill("Nitish Kumar")
+                                name_filled_pages.add(id(candidate))
+                                logger.info("guest_name_filled",
+                                            page=candidate.url[:60])
+                                break
+                        except Exception:  # noqa: BLE001
+                            continue
+                # Join button (enabled once a name is set / no name required)
+                for label in ("Join now", "Jetzt beitreten", "Rejoindre"):
                     try:
-                        box = page.locator(name_sel).first
-                        if box.is_visible(timeout=500):
-                            box.fill("Nitish Kumar")
-                            name_filled = True
-                            logger.info("guest_name_filled")
+                        btn = candidate.get_by_role("button", name=label).first
+                        if btn.is_enabled(timeout=800):
+                            btn.click(timeout=3000)
+                            joined = True
+                            joined_page = candidate
                             break
                     except Exception:  # noqa: BLE001
                         continue
-            # Join button (enabled once a name is set / no name required)
-            for label in ("Join now", "Jetzt beitreten", "Rejoindre"):
-                try:
-                    btn = page.get_by_role("button", name=label).first
-                    if btn.is_enabled(timeout=800):
-                        btn.click(timeout=3000)
-                        joined = True
-                        break
-                except Exception:  # noqa: BLE001
-                    continue
+                if joined:
+                    break
             if not joined:
                 time.sleep(2)
+        page = joined_page
         if not joined:
             # Diagnostics: screenshot + visible text so join failures are
             # always explainable (ended meeting, lobby, permission wall…).
