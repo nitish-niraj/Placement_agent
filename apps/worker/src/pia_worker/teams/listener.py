@@ -30,8 +30,8 @@ from pia_worker.settings import get_settings
 
 logger = structlog.get_logger()
 
-_STATE_FILE = Path(__file__).resolve().parents[3] / "infrastructure" / "teams_session.json"
-_TRANSCRIPT_DIR = Path(__file__).resolve().parents[3] / "transcripts"
+_STATE_FILE = Path(__file__).resolve().parents[5] / "infrastructure" / "teams_session.json"
+_TRANSCRIPT_DIR = Path(__file__).resolve().parents[5] / "transcripts"
 _FORM_LINK = (
     "https?://(?:forms\\.(?:office|glide)\\.com|docs\\.google\\.com/forms)"
     "[^\\s\"<>]*"

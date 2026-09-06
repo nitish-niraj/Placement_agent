@@ -12,11 +12,15 @@ listener bot — the password is never stored anywhere.
 Session expiry: if the listener later reports "login needed", re-run this.
 """
 
+import time
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
-_STATE_FILE = Path(__file__).resolve().parents[3] / "infrastructure" / "teams_session.json"
+# Host-run tool: .../apps/worker/src/pia_worker/teams/login_save.py → repo root
+# is five parents up. (This script never runs in a container.)
+_REPO_ROOT = Path(__file__).resolve().parents[5]
+_STATE_FILE = _REPO_ROOT / "infrastructure" / "teams_session.json"
 
 
 def main() -> None:
@@ -27,12 +31,30 @@ def main() -> None:
         page = context.new_page()
         page.goto("https://teams.microsoft.com/")
         print("Log in with your university account (complete MFA).")
-        print("Waiting for the Teams app shell to load... (up to 5 minutes)")
-        # Signed-in signal: the Teams shell renders the app bar / chat surface.
-        page.wait_for_url("**/teams.microsoft.com/**", timeout=300_000)
-        page.wait_for_timeout(8000)  # let the app settle before freezing cookies
+        print("The browser stays open until you are signed in (up to 5 minutes).")
+
+        # Wait for a SIGNED-IN state: the URL must leave the login pages AND
+        # reach the Teams v2 shell. Matching the bare teams.microsoft.com URL
+        # was the bug — it matches before login and saves an empty session.
+        deadline = time.time() + 300
+        signed_in = False
+        while time.time() < deadline:
+            url = page.url
+            if ("login.microsoftonline" not in url and "login.live" not in url
+                    and "/signin" not in url and "/v2/" in url):
+                page.wait_for_timeout(4000)  # let the app shell settle
+                if "login" not in page.url:
+                    signed_in = True
+                    break
+            page.wait_for_timeout(2000)
+        if not signed_in:
+            print("Timed out waiting for sign-in — nothing saved. Try again.")
+            browser.close()
+            return
+
         context.storage_state(path=str(_STATE_FILE))
-        print(f"Session saved: {_STATE_FILE}")
+        print(f"Signed in — session saved: {_STATE_FILE} "
+              f"({_STATE_FILE.stat().st_size} bytes)")
         browser.close()
 
 
