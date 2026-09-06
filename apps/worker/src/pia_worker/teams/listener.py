@@ -215,20 +215,45 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
             except Exception:  # noqa: BLE001 — direct links skip the launcher
                 continue
 
-        # Pre-join screen: ensure mic/camera are OFF, then Join.
-        for toggle_label in ("camera", "mic", "Caméra", "Mikrofon"):
-            try:
-                page.get_by_label(toggle_label, exact=False).first.click(timeout=1500)
-            except Exception:  # noqa: BLE001
-                continue
+        # Join state machine (60s): the pre-join flow differs by link type —
+        # work links go straight to toggles+Join; personal links (teams.live)
+        # use the anonymous guest flow: a NAME ENTRY field appears first, and
+        # "Join now" only enables once a name is filled.
         joined = False
-        for label in ("Join now", "Jetzt beitreten", "Rejoindre"):
-            try:
-                page.get_by_role("button", name=label).first.click(timeout=3000)
-                joined = True
-                break
-            except Exception:  # noqa: BLE001
-                continue
+        name_filled = False
+        join_deadline = time.time() + 60
+        while time.time() < join_deadline and not joined:
+            # mic/camera off whenever the toggles are present
+            for toggle_label in ("camera", "mic", "Caméra", "Mikrofon"):
+                with contextlib.suppress(Exception):
+                    page.get_by_label(toggle_label, exact=False).first.click(
+                        timeout=800)
+            # guest name entry (personal links)
+            if not name_filled:
+                for name_sel in ("input[placeholder*='name' i]",
+                                 "input[aria-label*='name' i]",
+                                 "input[type='text']"):
+                    try:
+                        box = page.locator(name_sel).first
+                        if box.is_visible(timeout=500):
+                            box.fill("Nitish Kumar")
+                            name_filled = True
+                            logger.info("guest_name_filled")
+                            break
+                    except Exception:  # noqa: BLE001
+                        continue
+            # Join button (enabled once a name is set / no name required)
+            for label in ("Join now", "Jetzt beitreten", "Rejoindre"):
+                try:
+                    btn = page.get_by_role("button", name=label).first
+                    if btn.is_enabled(timeout=800):
+                        btn.click(timeout=3000)
+                        joined = True
+                        break
+                except Exception:  # noqa: BLE001
+                    continue
+            if not joined:
+                time.sleep(2)
         if not joined:
             # Diagnostics: screenshot + visible text so join failures are
             # always explainable (ended meeting, lobby, permission wall…).
