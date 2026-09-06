@@ -32,3 +32,4 @@ Thumbs.db
 .idea/
 .vscode/
 apps/dashboard/dist/
+backups/

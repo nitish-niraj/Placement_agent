@@ -5,6 +5,7 @@ name: pia
 
 services:
   postgres:
+    restart: unless-stopped
     image: pgvector/pgvector:pg15
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-pia}
@@ -21,6 +22,7 @@ services:
       retries: 12
 
   redis:
+    restart: unless-stopped
     image: redis:7-alpine
     ports:
       - "6379:6379"
@@ -31,6 +33,7 @@ services:
       retries: 12
 
   minio:
+    restart: unless-stopped
     image: minio/minio:latest
     command: server /data --console-address ":9001"
     environment:
@@ -59,6 +62,7 @@ services:
       "
 
   api:
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: apps/api/Dockerfile
@@ -79,6 +83,7 @@ services:
         condition: service_healthy
 
   worker:
+    restart: unless-stopped
     build:
       context: ..
       dockerfile: apps/worker/Dockerfile
@@ -99,6 +104,7 @@ services:
   # Evolution API — WhatsApp connector (P1, F-004/005). Image pinned per Q4:
   # maintained image is evoapicloud/evolution-api (atendai/ is stale at v2.2.3).
   evolution-api:
+    restart: unless-stopped
     image: evoapicloud/evolution-api:v2.3.7
     env_file: .env
     environment:
