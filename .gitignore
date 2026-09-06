@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node (dashboard, from P11)
+node_modules/
+dist/
+
+# Environment & secrets — NEVER commit (SEC-001)
+.env
+infrastructure/.env
+*.pem
+*.key
+
+# Local data
+data/
+*.sqlite3
+*.db
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+apps/dashboard/dist/

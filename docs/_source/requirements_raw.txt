@@ -1,0 +1,650 @@
+
+================================================================================
+FILE: C:/Users/kumar/Downloads/Placement_Intelligence_Agent_Master_Requirements.docx
+================================================================================
+PLACEMENT INTELLIGENCE AGENT
+Master Product Requirements + Technical Specification
+Build one feature at a time from this document
+[TABLE]
+Document Control | Value
+Product codename | Placement Intelligence Agent (PIA)
+Document type | Master Requirements Specification / PRD / System Design / Implementation Contract
+Version | 1.0
+Status | Build-ready baseline
+Date | 24 August 2026
+Primary interface | WhatsApp group ingestion + personal dashboard + notifications
+Primary user | Single student / candidate
+Connector | Evolution API
+Core principle | Read, understand, remember, personalize, notify; act only with explicit approval in later phases
+[/TABLE]
+[TABLE]
+Document rule Every implementation task must trace back to a requirement ID and acceptance criteria. A phase is complete only when its acceptance criteria, tests, observability, and failure handling are implemented.
+[/TABLE]
+1. Executive Summary
+Placement Intelligence Agent (PIA) is a private, personal AI agent that continuously processes selected WhatsApp group conversations, especially placement and academic groups, and turns noisy chat streams into personally relevant, persistent knowledge. It must detect company eligibility lists in Excel, CSV, PDF, image, or screenshot form; identify the user using name and other identity signals; remember company-specific eligibility; connect later messages to that remembered context; extract deadlines and placement events; suppress repeated notifications; and surface important academic or administrative information even when it is not placement-related.
+The system is explicitly designed as a hybrid deterministic + AI platform. Code must own identity, timestamps, persistence, state transitions, permissions, notification history, and safety controls. AI models may interpret language, classify information, extract entities, understand messy documents, and perform semantic matching, but model output must be validated before it changes authoritative state.
+[TABLE]
+Primary outcome The user should not need to read the placement group continuously. The system should behave as a reliable personal information filter: “Tell me what matters to me, remember the context, and do not make me read the same thing twice.”
+[/TABLE]
+2. Product Goals and Non-Goals
+2.1 Goals
+Capture messages and media from selected WhatsApp groups through a dedicated connector layer.
+Understand message intent and classify domain: placement, academic, examination, administrative, event, or general.
+Detect eligible-candidate announcements and analyze attached Excel/PDF/image/screenshot lists.
+Match the personal candidate profile with exact, normalized, variant, roll-number, and controlled fuzzy matching.
+Persist company eligibility and build a company/application lifecycle memory.
+Extract deadlines, exam dates, interview schedules, links, forms, KYC sessions, venues, and required actions.
+Detect repeated or semantically duplicate information and notify only on genuinely new information.
+Provide a concise, evidence-backed notification and an auditable dashboard/history.
+Later support human-approved actions such as preparing forms or KYC submissions without allowing uncontrolled autonomous submission by default.
+2.2 Non-goals for MVP
+Autonomous form submission or irreversible external actions.
+Processing every personal WhatsApp conversation by default.
+Publishing or sharing group content with third parties.
+Using an LLM as the sole source of truth for candidate identity or eligibility.
+Building a general-purpose autonomous browsing agent before the core information pipeline is reliable.
+3. Core User Stories
+[TABLE]
+ID | User story | Success outcome
+US-01 | As a student, I want to connect selected WhatsApp groups so I do not need to manually copy messages. | Messages and media arrive reliably and exactly once.
+US-02 | As a student, I want the agent to understand what is important. | Noise is suppressed and high-value announcements are surfaced.
+US-03 | As a student, I want eligible-candidate files checked against my profile automatically. | The system tells me whether my identity was found and shows evidence.
+US-04 | As a student, I want the agent to remember that I am eligible for a company. | Future company updates are automatically linked to me.
+US-05 | As a student, I want deadlines detected and surfaced. | I receive timely, personalized deadline alerts.
+US-06 | As a student, I do not want repeated messages to produce repeated alerts. | Semantically duplicate announcements are suppressed.
+US-07 | As a student, I still want important academic updates from placement groups. | Domain is independent from placement-only filtering.
+US-08 | As a student, I want evidence behind every important conclusion. | Each alert links to source message/document and extraction evidence.
+US-09 | As a student, I want future automation to use only the information and capabilities I explicitly authorize. | Actions are permissioned, auditable, and approval-gated.
+[/TABLE]
+4. Product Principles
+Personal relevance over volume: the system should optimize for “what matters to me”, not “summarize everything”.
+Persistent memory over isolated prompts: company and event context must survive individual model calls.
+Evidence over confidence theater: important outputs must include source references and extraction/match reasoning.
+Deterministic controls over model improvisation: safety, state, deduplication, and permissions are code-owned.
+Incremental implementation: every phase must be independently testable and deployable.
+Human approval for irreversible actions: autonomous actions are disabled by default.
+Provider independence: WhatsApp connectivity must be replaceable through an adapter boundary.
+5. Target System Architecture
+WhatsApp / Selected Groups        |        v+-----------------------+| Evolution API         |  <- WhatsApp transport / events / media+-----------+-----------+            | webhook/event            v+-----------------------+| Ingestion Gateway     |  <- authenticate, validate, normalize+-----------+-----------+            |            v+-----------------------+       +----------------------+| Queue / Job Layer     |------>| Media Processor      |+-----------+-----------+       | XLSX/CSV/PDF/Image   |            |                   +----------+-----------+            v                              |+-----------------------+                  || Message Intelligence  |<-----------------+| classify/extract      |+-----------+-----------+            |            v+-----------------------+| Personal Relevance    || + Eligibility Engine  |+-----------+-----------+            |            v+-----------------------+| Memory / Event Store  |  <- PostgreSQL + optional pgvector+-----------+-----------+            |       +----+----+       v         v+----------+  +----------------+| Notify   |  | Dashboard/API  |+----------+  +----------------+
+5.1 Architecture boundaries
+[TABLE]
+Boundary | Responsibility | Must not own
+WhatsApp Connector | Receive/send messages, connection state, media transport, provider events. | Business eligibility logic, personal memory, notification policy.
+Ingestion | Validate webhooks, normalize provider data, enforce idempotency, persist raw event. | LLM reasoning.
+Media Intelligence | Download, classify and parse files; OCR/vision; normalize candidate lists. | Final candidate identity without identity engine.
+Message Intelligence | Classify message domain and extract event candidates/entities. | Authoritative state transitions.
+Eligibility Engine | Evaluate candidate list/rules against profile and produce evidence-backed match result. | General message summarization.
+Memory/Event Engine | Persist facts, events, relationships, lifecycle states and deltas. | Direct WhatsApp transport.
+Notification Engine | Decide what/when/how to notify, suppress duplicates, keep delivery history. | Reinterpreting raw files.
+Action Engine (future) | Prepare or execute approved external actions. | Silent or irreversible execution without authorization.
+[/TABLE]
+6. Technology Baseline
+[TABLE]
+Layer | Recommended baseline | Notes
+WhatsApp | Evolution API | Use as provider adapter, not as the application brain. Current project supports Baileys-based WhatsApp Web and official Cloud API plus event/integration ecosystem.
+Backend | Python + FastAPI | Strong fit for document/AI pipeline and API layer.
+Database | PostgreSQL | Authoritative structured store.
+Vector memory | pgvector (optional) | Use only for semantic retrieval, not as source of truth for structured facts.
+Queue | Redis-backed worker initially | Keep job processing asynchronous for media/AI tasks.
+Object storage | S3-compatible / MinIO | Store media/documents outside relational rows.
+Excel | openpyxl / pandas | Deterministic table extraction.
+PDF | PyMuPDF | Text/table extraction and page-level evidence.
+Image | OCR + vision model fallback | Use layered extraction; retain page/image evidence.
+Frontend | React + TypeScript | Dashboard and configuration.
+Deployment | Docker Compose for development; containerized production | Keep services reproducible.
+Observability | Structured logs + metrics + audit trail | Required before production.
+[/TABLE]
+[TABLE]
+Evolution API note The current Evolution API repository describes support for Baileys-based WhatsApp Web and official WhatsApp Cloud API, plus integrations including RabbitMQ, Kafka, SQS, Socket.io, S3/MinIO and AI tooling. Its current license is Apache 2.0 with additional conditions around Evolution branding/copyright and a usage-notification requirement. Review the repository LICENSE and TRADEMARKS before any commercial distribution.
+[/TABLE]
+7. Functional Requirements
+7.1 WhatsApp Connection & Group Registry
+FR-WA-001 — Connect WhatsApp account through Evolution API instance.  [MUST]
+User can pair and see connection state; reconnect failures are surfaced.
+Acceptance: Connection state transitions are persisted and visible.
+FR-WA-002 — Receive group messages as normalized internal events.  [MUST]
+Provider payload becomes a stable internal message schema.
+Acceptance: Same provider event reprocessed twice creates one logical message.
+FR-WA-003 — Persist group metadata.  [MUST]
+Group ID, name, participant metadata available where provider supplies it.
+Acceptance: Group registry can identify a message source.
+FR-WA-004 — Allow group allowlist/denylist.  [MUST]
+Only selected groups are processed by default.
+Acceptance: Unselected groups are not sent to AI pipeline.
+FR-WA-005 — Classify groups into Placement/Academic/Administrative/General/Other.  [SHOULD]
+Manual override is supported.
+Acceptance: Classification can be edited without modifying raw messages.
+FR-WA-006 — Receive message attachments/media metadata and fetch content when permitted.  [MUST]
+Documents/images are available to media processor.
+Acceptance: Failed media downloads become retryable jobs, not silent drops.
+7.2 Message Normalization & Idempotency
+FR-MSG-001 — Normalize message IDs, sender, group, timestamp, text and media references.  [MUST]
+Canonical schema independent of provider-specific payload.
+Acceptance: Unit tests cover missing/optional provider fields.
+FR-MSG-002 — Apply idempotent ingestion.  [MUST]
+Duplicate webhook/event does not create duplicate record or duplicate job.
+Acceptance: 10 identical deliveries result in one stored logical event.
+FR-MSG-003 — Preserve raw provider payload securely for audit/debugging with retention policy.  [SHOULD]
+Raw data can be linked to normalized message.
+Acceptance: Retention is configurable.
+FR-MSG-004 — Track processing states.  [MUST]
+RECEIVED, QUEUED, PROCESSING, PROCESSED, FAILED, RETRYING.
+Acceptance: State transitions are queryable.
+7.3 Message Classification
+FR-CLS-001 — Classify domain: PLACEMENT, ACADEMIC, EXAMINATION, ADMINISTRATIVE, EVENT, GENERAL, UNKNOWN.  [MUST]
+Every eligible message gets a domain label plus confidence/evidence.
+Acceptance: Low-confidence cases are not silently treated as high importance.
+FR-CLS-002 — Classify importance: CRITICAL, HIGH, MEDIUM, LOW, IGNORE.  [MUST]
+Importance is separate from domain.
+Acceptance: A non-placement academic deadline can be CRITICAL.
+FR-CLS-003 — Extract company names, institutions, dates, links, locations, actions, deadlines and document references.  [MUST]
+Output follows structured schema.
+Acceptance: Unknown fields are null, not hallucinated.
+FR-CLS-004 — Support rule-based overrides for known patterns.  [SHOULD]
+User/system rules can override model classification.
+Acceptance: Overrides are auditable.
+7.4 Candidate Profile & Personal Knowledge
+FR-PRO-001 — Create secure candidate profile.  [MUST]
+Stores user-entered identity and eligibility attributes.
+Acceptance: Profile changes are audited.
+FR-PRO-002 — Support identity aliases and identifiers.  [MUST]
+Name variants, roll number, registration number, student ID and approved aliases.
+Acceptance: Matcher can use configured identifiers.
+FR-PRO-003 — Support profile documents.  [SHOULD]
+Resume, certificates and academic proofs can be attached.
+Acceptance: Documents have explicit access permissions.
+FR-PRO-004 — Allow user to correct a false match or false negative.  [MUST]
+Correction becomes supervised feedback.
+Acceptance: Correction is stored with timestamp and source.
+7.5 Eligibility List Intelligence
+FR-ELG-001 — Detect that a message/attachment represents an eligible-candidate list.  [MUST]
+Recognizes text, file name and document content signals.
+Acceptance: Tested on text-only, file-only and combined announcements.
+FR-ELG-002 — Parse XLSX/XLS/CSV lists.  [MUST]
+Extract rows/columns and likely identity fields.
+Acceptance: Common header variations are supported.
+FR-ELG-003 — Parse PDFs.  [MUST]
+Extract text and preserve page/position evidence where feasible.
+Acceptance: User match includes page reference.
+FR-ELG-004 — Analyze images/screenshots.  [MUST]
+OCR first; vision model used when OCR is insufficient.
+Acceptance: Match includes image/page evidence.
+FR-ELG-005 — Normalize candidate names before matching.  [MUST]
+Case, whitespace, punctuation, Unicode and common formatting variations normalized.
+Acceptance: Exact normalized matches work reliably.
+FR-ELG-006 — Use multiple identity signals.  [MUST]
+Prefer roll/registration ID when available; use name as primary/secondary depending on data.
+Acceptance: Ambiguous same-name cases are not auto-confirmed.
+FR-ELG-007 — Support controlled fuzzy matching.  [SHOULD]
+Fuzzy match is used only after deterministic checks and must return confidence plus evidence.
+Acceptance: Configurable threshold; ambiguous matches require review.
+FR-ELG-008 — Create Eligibility Record when the user is found.  [MUST]
+Company + candidate + source + confidence + detected_at persisted.
+Acceptance: Record is linked to original message/document.
+FR-ELG-009 — Create Not Found / Unknown state without claiming ineligibility.  [MUST]
+Absence from one document is not interpreted as definitive rejection unless document semantics support it.
+Acceptance: System distinguishes NOT_FOUND from NOT_ELIGIBLE.
+7.6 Company Memory & Lifecycle
+FR-MEM-001 — Create company entity from messages.  [MUST]
+Canonical company name plus aliases.
+Acceptance: Accenture/Accenture India style variants can map to one entity when evidence supports it.
+FR-MEM-002 — Persist company-specific eligibility state.  [MUST]
+ELIGIBLE, NOT_ELIGIBLE, UNKNOWN, EXPIRED, SUPERSEDED.
+Acceptance: State changes keep source evidence.
+FR-MEM-003 — Associate later messages with known companies.  [MUST]
+Company mention, aliases, event context and group context used.
+Acceptance: “Accenture OA” resolves to existing company record.
+FR-MEM-004 — Track application lifecycle.  [SHOULD]
+DISCOVERED → ELIGIBLE → REGISTRATION → OA → SHORTLISTED → INTERVIEW → SELECTED/REJECTED.
+Acceptance: Transitions are event-driven and reversible via correction.
+FR-MEM-005 — Support company-specific watch state.  [MUST]
+Once user is eligible, future related messages are prioritized automatically.
+Acceptance: No manual re-subscription needed.
+7.7 Event & Deadline Engine
+FR-EVT-001 — Extract event types.  [MUST]
+REGISTRATION, FORM, KYC, OA, EXAM, INTERVIEW, SHORTLIST, RESULT, VENUE, DOCUMENT_SUBMISSION, JOINING, OTHER.
+Acceptance: Structured event record created.
+FR-EVT-002 — Extract absolute and relative dates/times.  [MUST]
+“today 6 PM”, “tomorrow”, and explicit dates resolved using user timezone.
+Acceptance: Stored timestamp includes timezone.
+FR-EVT-003 — Track deadlines as first-class objects.  [MUST]
+Deadline state is OPEN, DUE_SOON, EXPIRED, CANCELLED, COMPLETED.
+Acceptance: Deadline can be updated by later message.
+FR-EVT-004 — Detect event deltas.  [MUST]
+New link, changed deadline, new venue, changed time etc. update existing event.
+Acceptance: User is notified only for meaningful delta.
+FR-EVT-005 — Prevent hallucinated deadlines.  [MUST]
+Missing date/time remains unknown.
+Acceptance: Model cannot invent a deadline.
+7.8 Semantic Deduplication & Information Delta
+FR-DED-001 — Detect exact duplicate messages.  [MUST]
+Content hash plus provider ID.
+Acceptance: Duplicate does not re-notify.
+FR-DED-002 — Detect near-duplicate messages.  [MUST]
+Normalized textual similarity.
+Acceptance: Minor wording changes map to same candidate event when appropriate.
+FR-DED-003 — Detect semantic duplicate announcements.  [MUST]
+Compare event/company/action/deadline facts, not only raw text.
+Acceptance: Three reminders about same deadline produce one canonical event.
+FR-DED-004 — Detect information delta.  [MUST]
+Same event with new link/venue/deadline/status is updated, not discarded.
+Acceptance: New material information can trigger a notification.
+FR-DED-005 — Maintain canonical event history.  [SHOULD]
+Every update links to source messages.
+Acceptance: Timeline shows original and updates.
+7.9 Personal Relevance & Notification
+FR-NOT-001 — Calculate personal relevance.  [MUST]
+Uses profile, eligibility, company memory, academic context, role and actionability.
+Acceptance: Relevant company update is prioritized.
+FR-NOT-002 — Notify eligible-company updates.  [MUST]
+Any new high-value event for a company where user is eligible is considered for immediate notification.
+Acceptance: Accenture eligibility followed by OA deadline produces alert.
+FR-NOT-003 — Notify critical academic/admin information.  [MUST]
+Placement group can carry important non-placement information.
+Acceptance: Academic exam deadline is surfaced even with no company relation.
+FR-NOT-004 — Suppress already-delivered identical information.  [MUST]
+Notification history prevents repeat alerts.
+Acceptance: Repeated reminder does not spam user.
+FR-NOT-005 — Support escalation.  [SHOULD]
+Upcoming deadline becomes more urgent as due time approaches.
+Acceptance: Configurable reminder windows.
+FR-NOT-006 — Provide daily digest.  [SHOULD]
+Summary groups urgent, placement, academic, and tracked items.
+Acceptance: Digest contains only new/actionable information.
+FR-NOT-007 — Include evidence in alerts.  [MUST]
+Source group/message and attachment when relevant.
+Acceptance: User can trace the alert to its origin.
+8. Media & Document Intelligence Specification
+[TABLE]
+Input | Primary parser | Fallback | Required output
+XLSX/XLS | openpyxl / pandas | Vision/LLM for unusual formatting | Normalized candidate rows + headers + source sheet
+CSV | pandas/csv | LLM only for unclear schema | Normalized candidate rows
+PDF text | PyMuPDF | OCR/vision | Text + page references
+Scanned PDF | OCR | Vision model | Text + page references + confidence
+JPG/PNG screenshot | OCR | Vision model | Text/table + bounding/evidence metadata where possible
+Image of eligibility list | OCR + vision | Manual review | Candidate list + confidence
+[/TABLE]
+8.1 Normalized Candidate Row
+CandidateRow {  source_document_id  source_page_or_sheet  row_index  raw_name  normalized_name  roll_number?  registration_number?  student_id?  other_identifiers: map  extraction_confidence}
+8.2 Match Result Contract
+MatchResult {  status: MATCHED | NOT_FOUND | AMBIGUOUS | INVALID_SOURCE  matched_identity_id?  match_method: EXACT | NORMALIZED | IDENTIFIER | FUZZY | MODEL_REVIEW  confidence  evidence[]  requires_user_review: boolean}
+9. Data Model
+[TABLE]
+Entity | Purpose | Key fields
+User | System owner | id, timezone, notification_preferences
+CandidateProfile | Personal attributes | user_id, canonical_name, aliases, roll_no, student_id, academic attributes
+WhatsAppInstance | Provider connection | instance_id, provider, status, secret_ref, last_seen
+Group | Source group registry | group_id, provider_group_id, name, category, enabled, priority
+Message | Normalized WhatsApp message | id, provider_message_id, group_id, sender_id, sent_at, text, content_hash, processing_state
+Attachment | Media reference | id, message_id, mime_type, storage_key, checksum, processing_state
+DocumentExtraction | Parsed output | document_id, extractor, version, text, structured_payload, confidence, evidence
+Company | Canonical company | id, canonical_name, aliases
+EligibilityRecord | Personal eligibility state | user_id, company_id, state, confidence, source_message_id, source_document_id, created_at
+Event | Canonical business event | company_id?, type, status, start_at?, deadline_at?, canonical_key, current_payload
+EventUpdate | Change history | event_id, source_message_id, delta, detected_at
+Deadline | First-class deadline | event_id, due_at, status, reminder_policy
+Notification | Decision record | user_id, event_id/message_id, priority, reason, dedup_key, status
+MemoryRecord | Semantic/structured contextual memory | scope, subject, predicate, object/value, source, confidence
+Action | Future agent action | type, target, payload, risk_level, status, approval_required
+AuditLog | Security and traceability | actor, action, entity, timestamp, result, metadata
+[/TABLE]
+10. State Machines
+10.1 Message processing
+RECEIVED -> VALIDATED -> QUEUED -> PROCESSING -> PROCESSED                         |-> RETRYING -> PROCESSING                         |-> FAILEDRules: terminal FAILED requires visible reason; retries use backoff and dead-letter handling.
+10.2 Eligibility
+UNKNOWN -> MATCHED -> ELIGIBLEUNKNOWN -> NOT_FOUNDUNKNOWN -> AMBIGUOUS -> USER_CONFIRMED -> ELIGIBLEExisting eligibility can become SUPERSEDED or EXPIRED when new authoritative evidence appears.
+10.3 Event lifecycle
+DETECTED -> ACTIVE -> COMPLETED          |-> UPDATED -> ACTIVE          |-> CANCELLED          |-> EXPIRED
+10.4 Future action lifecycle
+PROPOSED -> WAITING_APPROVAL -> APPROVED -> EXECUTING -> SUCCEEDED                         |-> REJECTED                         |-> EXPIRED                         |-> FAILED
+11. Notification Policy
+[TABLE]
+Priority | Examples | Default delivery | Dedup rule
+CRITICAL | Deadline today; mandatory KYC; exam/reporting time; user confirmed eligible and action required | Immediate | No repeat unless material delta or escalation window
+HIGH | OA announcement; shortlist; new company event; registration deadline >24h | Immediate | One notification per canonical event state
+MEDIUM | General academic announcement; non-urgent update | Daily digest | Aggregate by topic/event
+LOW | Contextual or informational message | Digest / dashboard | Aggregate
+IGNORE | Greetings, memes, casual chatter, duplicate reminders | No notification | Always suppress unless user explicitly asks
+[/TABLE]
+11.1 Notification template contract
+Title: [priority emoji] [canonical event/company]What changed: one or two sentencesWhy it matters to you: explicit relevance reasonDeadline/time: exact local date/time if knownAction: what the user should doSource: group + message/document referenceConfidence: optional, only when ambiguity exists
+12. AI/LLM Contracts
+LLM calls must use structured output schemas. Model prompts must instruct the model to return null/unknown when evidence is missing. Raw model output must not directly mutate authoritative state; a validator and state-transition layer must consume it.
+[TABLE]
+AI task | Input | Output | Guardrail
+Message classifier | Message text + group context | domain, importance, confidence, rationale | Unknown allowed; rule overrides supported
+Entity extractor | Message text | company, dates, links, actions, event clues | No invented values
+Eligibility detector | Message + attachment metadata/content | is_candidate_list, company, evidence | Must cite source cues
+Vision/OCR reviewer | Image/PDF page | candidate rows / table regions | Ambiguous names remain ambiguous
+Relevance scorer | Structured event + profile/memory | relevance score + reasons | No access outside permission scope
+Summarizer | Canonical events/updates | digest summary | Summarize facts already stored; do not add facts
+Future action planner | Approved event + capability profile | action plan | Cannot submit without policy + approval
+[/TABLE]
+13. Security, Privacy & Safety Requirements
+SEC-001 — All secrets, WhatsApp session credentials and API tokens must be excluded from source control.  [MUST]
+Security control required for the system.
+Acceptance: Control is enforced and covered by automated tests.
+SEC-002 — Sensitive profile fields and stored documents must be encrypted at rest where practical and access-controlled.  [MUST]
+Security control required for the system.
+Acceptance: Control is enforced and covered by automated tests.
+SEC-003 — Webhook requests must be authenticated/verified and rate-limited.  [MUST]
+Security control required for the system.
+Acceptance: Control is enforced and covered by automated tests.
+SEC-004 — Every future external action must be permission-checked and audited.  [MUST]
+Security control required for the system.
+Acceptance: Control is enforced and covered by automated tests.
+SEC-005 — Autonomous irreversible actions are disabled by default.  [MUST]
+Security control required for the system.
+Acceptance: Control is enforced and covered by automated tests.
+SEC-006 — The system must minimize processing to enabled groups only.  [MUST]
+Security control required for the system.
+Acceptance: Control is enforced and covered by automated tests.
+SEC-007 — Retention policy must exist for raw media, messages, and model artifacts.  [SHOULD]
+Security control required for the system.
+Acceptance: Control is enforced and covered by automated tests.
+SEC-008 — Model providers must be configurable so privacy-sensitive deployments can use a provider appropriate to the user’s requirements.  [SHOULD]
+Security control required for the system.
+Acceptance: Control is enforced and covered by automated tests.
+SEC-009 — User-facing evidence must distinguish observed facts from AI interpretation.  [MUST]
+Security control required for the system.
+Acceptance: Control is enforced and covered by automated tests.
+14. Reliability & Observability
+Every inbound message receives a correlation ID.
+Every background job has a retry count, error class and last error.
+AI requests log model/provider, latency, token/usage metadata where available, schema validation result, but not unnecessary sensitive content.
+Core metrics: messages received, processing lag, attachment success rate, classifier confidence distribution, eligibility match rate, false-match corrections, duplicate suppression count, notifications sent, notification delivery failures, deadline reminders delivered on time.
+Create a dead-letter queue for permanently failing jobs.
+Provide an operational health endpoint for API, DB, queue, Evolution API connection and worker health.
+15. Non-Functional Requirements
+[TABLE]
+NFR | Requirement | Target
+NFR-001 Reliability | No silent message loss after webhook acceptance. | >=99.5% processed or visible in failed/retry state in MVP
+NFR-002 Idempotency | Duplicate provider deliveries do not duplicate logical records. | 100% for tested duplicate cases
+NFR-003 Timeliness | Normal text messages become searchable quickly. | p95 < 10 seconds under normal load
+NFR-004 Media processing | Common documents complete asynchronously. | p95 < 2 minutes for standard files; configurable
+NFR-005 Notification accuracy | No duplicate alerts for same canonical event without delta. | >=99% in regression suite
+NFR-006 Match safety | Ambiguous identity must not become confirmed automatically. | 100% in safety tests
+NFR-007 Auditability | Important notifications trace to evidence. | 100% of critical/high notifications
+NFR-008 Security | No credentials in logs/source. | Continuous secret scanning + tests
+NFR-009 Extensibility | Provider adapter can be replaced without rewriting business engine. | Interface contract + integration tests
+[/TABLE]
+16. Initial API Contract
+[TABLE]
+Method | Endpoint | Purpose
+GET | /health | Service health
+POST | /webhooks/evolution | Receive provider event
+GET | /groups | List configured groups
+PATCH | /groups/{id} | Enable/category/priority
+GET | /messages | Search normalized messages
+GET | /companies | List tracked companies
+GET | /companies/{id} | Company timeline and state
+GET | /eligibility | List eligibility records
+GET | /events | Search canonical events
+GET | /deadlines | Upcoming deadlines
+GET | /notifications | Notification history
+POST | /profile | Create/update candidate profile
+POST | /feedback/match | Correct match result
+GET | /audit | Administrative audit view
+POST | /actions/{id}/approve | Future approval endpoint
+[/TABLE]
+17. Dashboard Requirements
+[TABLE]
+Screen | Must show
+Overview | Urgent items, today’s deadlines, recent important updates, tracked companies
+Companies | Company lifecycle, eligibility state, latest event, next deadline
+Timeline | Chronological source-backed events and updates
+Inbox | AI-filtered important messages with source evidence
+Documents | Processed candidate lists and match results
+Notifications | Delivered/suppressed alerts and reasons
+Profile | Identity, academic, placement and capability information
+Settings | Group selection, thresholds, notification windows, data retention, provider/model configuration
+Audit | State changes, user corrections, future action approvals
+[/TABLE]
+18. Phased Implementation Roadmap
+[TABLE]
+Phase | Name | Scope | Exit criterion
+P0 | Architecture & repository foundation | Docker, env management, repo structure, coding standards, test harness, observability baseline. | Architecture decision record + CI + local stack boots.
+P1 | Evolution API connector | Connect WhatsApp, receive webhooks, group discovery, connection health. | Live group message reaches internal webhook.
+P2 | Message persistence | Normalize message schema, attachments, idempotency, processing states. | 100 duplicate deliveries create one logical message.
+P3 | Basic intelligence | Domain/importance classification and entity extraction. | Regression dataset classified with defined quality threshold.
+P4 | Candidate profile | Secure profile, aliases, identity fields, corrections. | Profile can be used by eligibility engine.
+P5 | Document intelligence | XLSX/CSV/PDF/image pipeline, evidence extraction. | Fixture suite covers representative files.
+P6 | Eligibility engine | Matching, confidence, ambiguity, eligibility record. | Known fixtures correctly match user and ambiguous cases stop.
+P7 | Company memory | Company entity, watch state, lifecycle. | Future company messages connect to prior eligibility.
+P8 | Event/deadline engine | Event canonicalization, deadline extraction, updates. | Deadline changes update canonical event.
+P9 | Semantic dedup | Exact, near and semantic duplicates; delta detection. | Repeated reminders suppressed; new info still alerts.
+P10 | Notification engine | Priority, immediate/digest, escalation, delivery history. | High-value event generates one actionable alert.
+P11 | Dashboard | Overview, company, timeline, documents, notifications, settings. | User can inspect every important decision.
+P12 | Conversational search | Ask “what happened with Accenture?” over structured memory + source messages. | Answer is source-backed and temporally accurate.
+P13 | Action preparation | Detect KYC/form tasks; map profile fields; draft actions. | Action proposal requires explicit approval.
+P14 | Controlled automation | Approved browser/form workflows with audit and rollback/abort controls. | No irreversible action without authorization.
+[/TABLE]
+19. Feature-by-Feature Build Order
+[TABLE]
+How to use this section Do not start the next feature until the current feature meets its acceptance criteria and has unit + integration tests. Each feature should end with a working demo, logs/metrics, migration if needed, and documentation.
+[/TABLE]
+[TABLE]
+Feature | Name | Phase | Implementation outcome
+F-001 | Repository bootstrap | P0 | Create apps/api, apps/worker, apps/dashboard, packages/shared, infrastructure, tests, docs.
+F-002 | PostgreSQL baseline | P0 | Migrations, UUIDs, timestamps, indexes, audit fields.
+F-003 | Redis/job baseline | P0 | Queue abstraction, retries, dead-letter queue.
+F-004 | Evolution instance registration | P1 | Create/check instance and connection status.
+F-005 | Webhook receiver | P1 | Signature/auth validation, normalized event envelope.
+F-006 | Group discovery | P1 | Store group metadata and configurable allowlist.
+F-007 | Message persistence | P2 | Canonical message table + attachment table.
+F-008 | Idempotent processing | P2 | Provider ID/content hash idempotency.
+F-009 | Classifier v1 | P3 | Rule + LLM hybrid classification.
+F-010 | Candidate profile | P4 | Profile CRUD + secure fields.
+F-011 | XLSX parser | P5 | Header detection + row normalization.
+F-012 | PDF parser | P5 | Text/page extraction.
+F-013 | Image OCR | P5 | OCR and confidence.
+F-014 | Vision fallback | P5 | Structured table/candidate extraction from image.
+F-015 | Identity matcher | P6 | Exact → normalized → identifier → fuzzy → review.
+F-016 | Eligibility record | P6 | Persist matched/ambiguous/not-found state.
+F-017 | Company canonicalization | P7 | Company aliases and resolution.
+F-018 | Company watch | P7 | Route future messages through eligibility memory.
+F-019 | Event extraction | P8 | Canonical event model.
+F-020 | Deadline extraction | P8 | Timezone-safe due dates.
+F-021 | Event update/delta | P8 | Changed deadline/link/venue updates event.
+F-022 | Duplicate engine | P9 | Exact + semantic dedup.
+F-023 | Notification decision | P10 | Priority and relevance policy.
+F-024 | Notification delivery | P10 | WhatsApp/self notification + delivery history.
+F-025 | Digest | P10 | Daily summary.
+F-026 | Dashboard overview | P11 | Personal cockpit.
+F-027 | Company timeline | P11 | Evidence-backed history.
+F-028 | Conversational search | P12 | Natural-language historical queries.
+F-029 | KYC/form detector | P13 | Action proposal.
+F-030 | Approval workflow | P13 | Approve/reject/expire.
+F-031 | Browser/action executor | P14 | Explicitly allowlisted automation.
+[/TABLE]
+20. Testing Strategy
+20.1 Test layers
+Unit tests: normalization, date parsing, identity normalization, match scoring, dedup keys, state transitions.
+Fixture tests: real-world-like Excel/PDF/image eligibility lists with expected candidate matches.
+Integration tests: Evolution webhook → DB → queue → processing.
+End-to-end tests: message → eligibility → company memory → deadline → notification.
+AI regression tests: fixed prompt/model test set with structured output validation.
+Safety tests: same-name ambiguity, missing evidence, stale eligibility list, contradictory updates, duplicate reminders, failed OCR.
+Chaos/reliability tests: duplicate webhook, worker restart, queue backlog, media timeout, DB restart.
+20.2 Golden end-to-end scenario
+1. Group posts: “Accenture eligible list attached.”2. Attachment is XLSX/image/PDF.3. System detects candidate list and extracts rows.4. Identity matcher finds the user using exact/normalized/ID evidence.5. EligibilityRecord = ELIGIBLE with source evidence.6. User receives one eligibility alert.7. Two hours later: “Accenture OA tomorrow 10 AM.”8. Company resolver links message to Accenture.9. Event engine creates OA event.10. Relevance engine sees existing ELIGIBLE state.11. Notification engine sends one HIGH/CRITICAL alert.12. Group repeats same message three times.13. Dedup engine suppresses repeats.14. Later message changes time to 11 AM.15. Event delta updates time and sends one update notification.
+21. Definition of Done for Every Feature
+□ Requirement ID mapped to implementation task(s).
+□ Happy-path implementation complete.
+□ Failure paths implemented.
+□ Unit tests added.
+□ Integration tests added when feature crosses boundaries.
+□ No secrets/logging leaks.
+□ Database migration added and reversible where practical.
+□ Observability added: log + metric + error state.
+□ User-visible behavior documented.
+□ Acceptance criteria demonstrated with a reproducible test.
+□ Existing regression suite passes.
+□ No unrelated feature bundled into the change.
+22. Configuration & Policy
+APP_TIMEZONE=Asia/KolkataWHATSAPP_PROVIDER=evolutionENABLED_GROUPS=...NOTIFY_CRITICAL_IMMEDIATELY=trueNOTIFY_MEDIUM_IN_DIGEST=trueFUZZY_MATCH_THRESHOLD=<configured after evaluation>AMBIGUOUS_MATCH_THRESHOLD=<configured after evaluation>MEDIA_MAX_SIZE_MB=<configured>RAW_MESSAGE_RETENTION_DAYS=<configured>DOCUMENT_RETENTION_DAYS=<configured>LLM_PROVIDER=<provider>LLM_MODEL=<model>ACTION_AUTOMATION_ENABLED=false
+Thresholds must be determined from evaluation data, not invented as arbitrary constants. Each threshold should have a rationale, test dataset, and expected error trade-off documented in configuration notes.
+23. Major Risks & Mitigations
+[TABLE]
+Risk | Impact | Mitigation
+WhatsApp connector changes/failure | High | Adapter boundary, health checks, replay/idempotency, backup notification path.
+False identity match | Critical | Deterministic identity signals, ambiguity state, evidence, human correction.
+OCR failure | High | Layered OCR + vision + source image retention + review state.
+Hallucinated deadline | Critical | Structured extraction, null/unknown policy, source evidence, validator.
+Notification spam | High | Canonical events, semantic dedup, delivery history, digest.
+Missed urgent update | High | High recall for critical patterns, escalation, regression corpus, monitoring.
+Sensitive data leakage | Critical | Encryption, least privilege, secret management, provider controls, audit log.
+Unapproved form submission | Critical | Actions disabled by default; explicit approval; allowlists; audit trail.
+Vendor/provider lock-in | Medium | Provider abstraction for messaging and LLMs.
+Evolution API license changes | Medium | Pin tested version, monitor upstream license and maintain attribution/usage notice as required.
+[/TABLE]
+24. Future Scope
+Email ingestion and cross-source event correlation.
+Calendar synchronization for exams, OA sessions, interviews and deadlines.
+Placement portal monitoring through controlled browser automation.
+Automatic form preparation using profile data.
+Human-approved KYC/form submission.
+Personal career analytics: company funnel, response rates, missed deadlines, pending actions.
+Mobile application with push notifications.
+Offline/local-model mode for privacy-sensitive deployments.
+25. Decision Log / Architecture Rules
+[TABLE]
+Rule | Decision
+ADR-001 | Evolution API is a replaceable WhatsApp connector, not the business logic layer.
+ADR-002 | PostgreSQL is the source of truth for structured state.
+ADR-003 | Vector search is optional and never authoritative for eligibility/deadlines.
+ADR-004 | AI output must be schema-validated before state transitions.
+ADR-005 | Ambiguous identity is never silently converted to ELIGIBLE.
+ADR-006 | Canonical events are deduplication units for notifications.
+ADR-007 | Every important user-facing claim links to evidence.
+ADR-008 | Irreversible external actions require explicit approval by default.
+ADR-009 | All thresholds require evaluation-based justification.
+ADR-010 | Feature implementation proceeds strictly in phase order unless an ADR records a justified dependency change.
+[/TABLE]
+26. MVP Release Gate
+□ At least one real/fixture WhatsApp group successfully ingested end-to-end.
+□ At least one XLSX, one PDF and one image eligibility list processed.
+□ Correct user match achieved for known fixtures.
+□ Ambiguous same-name fixture never auto-confirms eligibility.
+□ Company memory links later company updates correctly.
+□ At least one deadline is extracted and normalized to Asia/Kolkata timezone.
+□ Repeated reminder sequence produces one notification, while a material delta produces one update.
+□ Important academic announcement is surfaced even if placement classification is false.
+□ Every critical/high alert has evidence.
+□ Failure/retry paths observable.
+□ Secrets and sensitive data absent from logs/source control.
+□ Automated action capability remains disabled in MVP.
+27. External Source Notes
+The Evolution API portion of this specification is based on the current public repository documentation reviewed on 24 August 2026. The repository describes Evolution API as an open-source REST API for WhatsApp and multi-channel messaging, with Baileys-based WhatsApp Web and official WhatsApp Cloud API support and a broader integration ecosystem. The current LICENSE contains additional conditions beyond Apache 2.0 concerning branding/copyright and a visible usage notification requirement. These points should be rechecked before each production or commercial release.
+Reference repository: https://github.com/evolution-foundation/evolution-api
+END OF MASTER REQUIREMENTS
+
+================================================================================
+FILE: C:/Users/kumar/Downloads/Placement_WhatsApp_Assistant_Requirements.docx
+================================================================================
+Placement WhatsApp Assistant
+Requirements & Phased Build Plan
+Prepared for: Niraj  |  Version 1.0  |  August 2026
+1. Project Summary
+An AI agent that connects to your own WhatsApp account (via Evolution API) to read placement-related group chats, and delivers:
+A clean, deduplicated summary of new messages
+Automatic detection of company eligibility lists (text, Excel, or image-based) and a search for your name/roll number in them
+Memory of which companies you are eligible for, with automatic high-priority alerts on any future related update
+Separate flagging of important academic notices that aren't placement-related
+(Future phase) Draft-filling of forms using your stored profile data, with you doing the final submit
+2. Reality Check — Read This First
+Before writing any code, it's worth being fully honest about what this tool actually is and its limits:
+Evolution API connects via the Baileys library, which talks to WhatsApp using the WhatsApp Web protocol. This is an unofficial / reverse-engineered method, not Meta's sanctioned Business API for this kind of use.
+It only works with your own WhatsApp account, linked the same way WhatsApp Web is (QR scan). It cannot access anyone else's private account or data you don't already have legitimate access to.
+Because it's unofficial, WhatsApp's Terms of Service don't officially permit this style of automated client — there is a non-zero risk of the linked number being flagged or banned, especially with heavy or bulk activity.
+Read-only monitoring (no sending, no spam) on a group you're already a genuine member of is the lowest-risk pattern, but not a zero-risk one.
+Recommendation: link a secondary WhatsApp number to this project for at least the first few months, not your primary number used for job/company communication.
+This is a personal automation tool for messages you already have legitimate access to as a group member — treat it accordingly, and keep the recommendation above in mind.
+3. Architecture Overview
+High-level data flow:
+WhatsApp placement groups → Evolution API (self-hosted, Docker) → webhook fires on every new message
+Backend service (Node.js or Python) receives the webhook and routes the message by type
+Text messages → classification + summarization engine
+Images → OCR / vision-LLM extraction
+Excel/doc attachments → spreadsheet parser
+Everything lands in PostgreSQL: messages, eligibility_lists, companies, user_profile, notification_log
+A notification layer (Telegram bot recommended) pushes digests and alerts to you
+4. Feature Breakdown — Phase by Phase
+Phase 0 — Foundation (Week 1)
+Goal: get raw messages flowing from the WhatsApp group into your own database.
+☐  Set up Evolution API locally (Docker) or on a small VPS
+☐  Connect a WhatsApp number (recommended: secondary number) via QR
+☐  Identify and record the Group JIDs of your placement groups
+☐  Configure a webhook so every new group message posts to your backend
+☐  Backend: a simple endpoint that logs incoming messages (text, sender, timestamp, media type) into PostgreSQL
+☐  Verify with a test message that it lands correctly in the database
+Exit criteria: every message in your target groups (text + media metadata) is reliably captured and stored.
+Phase 1 — Daily Summary (Week 2)
+Goal: turn raw messages into a readable daily digest.
+☐  Cron job pulls unsummarized messages on a schedule (e.g., every evening)
+☐  Batch messages sent to an LLM (Claude API) with a summarization prompt
+☐  Output a structured, date-wise and group-wise summary
+☐  Deliver via a Telegram bot (simplest) or email
+☐  Basic dedup: hash normalized message text, skip repeats seen recently in the same group
+Exit criteria: you get one clean daily digest instead of scrolling through raw WhatsApp messages.
+Phase 2 — Eligibility List Detection (Weeks 3-4)
+Goal: automatically detect company eligibility lists and check your own name against them.
+☐  Text-based lists: LLM classifies a message as an eligibility list using patterns (company name + "eligible" + names/roll numbers)
+☐  Excel attachments: auto-download and parse with pandas/openpyxl, searching all sheets and columns with fuzzy name matching
+☐  Image-based lists (screenshots of Excel/PDF): OCR or a vision-capable LLM extracts the text, then searches for your name
+☐  Store the result as: company, eligible status, source message, list type, confidence
+☐  Notification always states a confidence level and links back to the original message — never a silent, fully-confident claim from an image-only source
+Exit criteria: for any eligibility list posted — text, Excel, or image — the agent correctly finds or flags your name, with visible confidence and a source reference.
+Phase 3 — Company Memory & Smart Alerts (Week 5)
+Goal: remember which companies you are eligible for, and connect future messages to that memory.
+☐  A companies table storing name, eligibility status, first-seen date, and key dates
+☐  New messages mentioning a company already in that table are tagged as relevant to you and prioritized or sent as an immediate alert if time-sensitive
+☐  Deadline/date extraction from message text, with optional reminders ahead of the deadline
+☐  Academic-but-not-placement messages get a separate tag so they're visible but not mixed into placement alerts
+Exit criteria: once a company (e.g., Accenture) is marked eligible, any later message mentioning it is automatically flagged as high priority, without you repeating yourself.
+Phase 4 — Robust Deduplication (ongoing, refine after Phase 1)
+Goal: the same message forwarded five times in the group should reach you once.
+☐  Content-hash dedup for exact or near-exact text
+☐  Perceptual hashing (pHash) for images, so re-forwarded or re-compressed screenshots are still recognized
+☐  Time-window logic: content reappearing after 7+ days is treated as a legitimate reminder, not noise
+Phase 5 — Future / Advanced (only after Phases 0-4 are solid)
+Goal: assist with forms and sessions using your stored profile data.
+☐  A structured user_profile schema (name, roll no, CGPA, branch, contact, resume link, skills, projects) filled once by you
+☐  Form auto-fill via browser automation (e.g., Playwright) matching form fields to your profile — feasible, but each company's form differs, so expect to review the first few closely
+☐  KYC / identity-verification sessions: intentionally NOT automated (see note below)
+☐  Realistic version: the agent pre-fills a form draft and reminds you of session timing; you perform the actual submit or attend the session
+A KYC or verification session exists specifically to confirm it's really you. Automating attendance would misrepresent your identity to the company or college and is not something to build, regardless of convenience — this should stay a manual, human step.
+5. Recommended Tech Stack
+[TABLE]
+Layer | Tool | Why
+WhatsApp connector | Evolution API (Baileys) | Open source, self-hostable, webhook-based
+Backend | Node.js (TypeScript) or Python (FastAPI) | Node pairs naturally with Evolution API; Python eases OCR/pandas work
+Database | PostgreSQL | Evolution API already uses it; one DB for everything
+OCR | Claude vision input; Tesseract as free fallback | Handles messy screenshots and name-matching reasoning together
+Excel parsing | pandas / openpyxl | Standard, handles multi-sheet files
+LLM (summary, classify) | Claude API | Structured JSON output for classification tasks
+Notification | Telegram Bot API | Free, instant, doesn't touch your WhatsApp account for sending
+Hosting | Small VPS or free-tier cloud VM | Evolution API needs to run continuously to catch messages
+[/TABLE]
+6. Data to Prepare Upfront
+Your full name as it might appear in lists, plus common misspellings
+Roll number / registration number
+CGPA, branch, batch
+Other fields companies commonly ask for (10th/12th %, backlog status, etc.)
+A Telegram account for the bot to message you
+7. Known Risks & Honest Limitations
+[TABLE]
+Risk | Mitigation
+WhatsApp account flagged/banned (unofficial API) | Use a secondary number; avoid bulk sends; read-only monitoring only
+OCR misreads names on image lists | Always show confidence + link to source message; never claim certainty from OCR alone
+WhatsApp protocol updates break Baileys, or group settings change | Build a simple health check ("last message received at") so silence is noticed, not assumed to mean no updates
+KYC/identity automation | Intentionally excluded from scope — see Phase 5
+Form auto-fill errors on unusual forms | Treat as auto-draft + human review/submit, not fully autonomous
+[/TABLE]
+8. Suggested Build Order
+Phase 0 — get messages flowing (prove the pipe works)
+Phase 1 — daily digest (first real value, fast)
+Phase 2 — eligibility detection (the core differentiator)
+Phase 3 — company memory and smart alerts
+Phase 4 — dedup polish (interleave as annoyances show up)
+Phase 5 — form-fill assistance only, human-in-the-loop for anything identity-related

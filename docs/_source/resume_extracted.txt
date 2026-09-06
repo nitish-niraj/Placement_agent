@@ -1,0 +1,83 @@
+Nitish Kumar
+Jamui, Bihar, India
+ +91 6206825031
+# 117425906+nitish-niraj@users.noreply.github.com
+ï linkedin.com/in/niru-nny
+§ github.com/nitish-niraj
+Internships
+Tech Specialist - AI & GenAI Projects
+Jul 2024 - Dec 2024
+Fruitfusion Advisory LLP (ZenLearn.ai)
+• Developed a RAG chatbot using Meta’s Llama 3.0 and ChromaDB to provide citation-backed answers across internal documents.
+• Created custom GPT workﬂows and supported the Big Five Personality Assessment platform deployment on AWS EC2/S3.
+• Reﬁned Moodle pages and updated the company website to make platform content easier to access and navigate.
+• Collaborated with a 4-member team to build an interactive ﬁnancial simulation tool using HTML, CSS, JavaScript, and Flask.
+Flutter Application Development Intern
+Nov 2023 - Jan 2024
+HealTether Healthcare Services Pvt. Ltd.
+• Designed and developed responsive Flutter UI screens from Figma designs for healthcare app workﬂows.
+• Standardized reusable widgets and components across modules as part of a shared design system.
+• Tested key healthcare app ﬂows and updated screens based on development-team feedback.
+• Delivered scheduling and data-management UI ﬂows with layouts that worked across common mobile screen sizes.
+Projects
+ResultKhoj.in - Document Understanding System for Government Exam Results
+Mar 2025 - Present
+Tech Stack: PyTorch, Donut, PaddleOCR, OpenCV, PyMuPDF, Label Studio, Elasticsearch
+• Fine-tuned a Donut (Document Understanding Transformer) model on 121 manually annotated result-page images to extract
+structured ﬁelds (roll number, name, marks) directly from scanned PDFs without OCR-dependent text extraction.
+• Architected a hybrid document pipeline combining PyMuPDF, OpenCV, and PaddleOCR to handle both text-based and scanned
+result formats, feeding clean input into the Donut model and downstream extraction logic.
+• Deployed the trained model into a searchable pipeline indexing 300K+ extracted records in Elasticsearch, enabling sub-second
+name/roll-number lookup at production scale.
+• Repository link: github.com/nitish-niraj/resultkhoj.
+TruthLayer - AI-Powered Fact Veriﬁcation Platform for PDFs and Images
+Jun 2026
+Tech Stack: FastAPI, PyMuPDF, Tavily API, NVIDIA Inference (Kimi K2.6), Pydantic, Render, Vercel
+• Launched an end-to-end fact-veriﬁcation pipeline that extracts claims from PDFs and images using Kimi K2.6 vision, cross-checks
+each one against live web evidence, and returns an evidence-backed verdict with source citations.
+• Orchestrated a non-blocking background-job architecture where veriﬁcation requests return a job ID in under 100ms while the
+client polls for live progress, avoiding proxy timeouts on long-running pipelines.
+• Strengthened production reliability with 191 automated tests (163 backend, 28 frontend) covering unit, integration, stress, and
+trap-dataset regression cases, plus typed error handling and startup validation.
+• Repository link: github.com/nitish-niraj/truthlayer.
+EduBridge - Online Teacher-Student Booking Platform
+Jan 2026 - Apr 2026
+Tech Stack: Laravel 10, MySQL, Pusher, Jitsi Meet, PhonePe
+• Implemented a multi-role tutoring platform for students, teachers, and admins with credential veriﬁcation, teacher search by
+subject, language, and rating, and role-based dashboards for 1-on-1 and group tutoring.
+• Engineered a real-time booking and communication system using Laravel Echo and Pusher with live availability calendars, instant
+chat, read receipts, and Jitsi Meet video sessions with screen sharing.
+• Integrated an end-to-end PhonePe payment ﬂow with escrow-style fund holding, payout tracking, teacher earnings dashboard,
+and admin controls for approvals, moderation, and analytics.
+• Repository link: github.com/nitish-niraj/edubridge.
+Skills
+• Languages: Python, C++, PHP, Dart, SQL
+• Domain Skills: LangChain, RAG, Prompt Engineering, Fine-tuning, Generative AI
+• AI/ML Frameworks: PyTorch, TensorFlow, Keras, Scikit-learn, OpenCV, PaddleOCR, Donut
+• Data Science & OCR: Pandas, NumPy, PyMuPDF, pdfplumber, pdf2image, OCR Pipelines, Label Studio
+• Backend & MLOps: FastAPI, Flask, Laravel 10, Docker, MLﬂow
+• Databases, Search & Cloud: MongoDB, MySQL, Elasticsearch, ChromaDB, Supabase, AWS
+Achievements
+• IDEATHON 2026 - Winner
+Feb 2026
+IEEE Student Branch & Startup, Innovation & Entrepreneurship Cell, LPU.
+• Smart India Hackathon 2025 - Winner
+Sep 2025
+(Code4City: Civic Issue Reporting System) as AI/ML Lead.
+Education
+Lovely Professional University
+2025 - 2027
+Master of Computer Applications - CGPA: 8.24
+Phagwara, Punjab
+Banaras Hindu University
+2021 - 2024
+Bachelor of Vocation in Computer Applications - CGPA: 7.67
+Varanasi, Uttar Pradesh
+Government Higher Secondary School, Kawakol
+2019 - 2021
+Higher Secondary (Science) - percentage: 75.6%
+Nawada, Bihar
+Government High School, Kawakol
+2017 - 2018
+Class X - percentage: 75.6%
+Nawada, Bihar

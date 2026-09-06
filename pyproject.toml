@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pia"
+version = "0.1.0"
+description = "Placement Intelligence Agent (PIA) — personal WhatsApp placement assistant"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.1",
+    "redis>=5.0",
+    "rq>=1.16",
+    "minio>=7.2",
+    "cryptography>=42.0",
+    "openpyxl>=3.1",
+    "pymupdf>=1.24",
+    "rapidocr-onnxruntime>=1.3",
+    "structlog>=24.1",
+    "httpx>=0.27",
+    "tzdata>=2024.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+    "mypy>=1.9",
+    "pre-commit>=3.6",
+]
+
+[tool.setuptools.packages.find]
+where = ["apps/api/src", "apps/worker/src", "packages/shared/src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["apps/api/src", "apps/worker/src", "packages/shared/src", "tests"]
+extend-exclude = ["infrastructure/alembic/versions"]  # SQL-heavy migrations; mypy excludes too
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"  # numpy stubs need 3.12 grammar; runtime floor stays 3.11
+ignore_missing_imports = true
+check_untyped_defs = true
+exclude = ["infrastructure/alembic/versions", "build", ".venv"]
+
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"  # numpy 3.12-only stubs break py311 type-checking
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-m 'not integration'"
+markers = [
+    "unit: fast isolated tests",
+    "integration: requires the docker compose stack running",
+]
