@@ -35,3 +35,4 @@ apps/dashboard/dist/
 backups/
 infrastructure/teams_session.json
 infrastructure/teams_session.json
+transcripts/

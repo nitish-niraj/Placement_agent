@@ -127,3 +127,16 @@ class ConversationalAnswer(BaseModel):
     citations: list[AnswerCitation] = Field(default_factory=list)
     says_unavailable: bool = False
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
+class MeetingSummary(BaseModel):
+    """P12+ Teams-listener output (Type-1 informational KYC, DEC-008 amendment).
+    Composed ONLY from the live captions/chat transcript the listener captured;
+    anything absent stays absent (FR-EVT-005 posture)."""
+
+    company: str | None = None
+    designation_discussed: str | None = None
+    package_mentioned: str | None = None
+    key_points: list[str] = Field(default_factory=list)
+    form_link: str | None = None
+    summary: str
