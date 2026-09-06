@@ -183,11 +183,24 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
         context = browser.new_context(
             storage_state=str(_STATE_FILE), viewport={"width": 1400, "height": 900},
             permissions=["microphone", "camera"],  # pre-join screen toggles handled anyway
+            # Realistic UA: Teams serves the full app shell to real browsers;
+            # the default automation UA gets a degraded, never-loading shell.
+            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0"),
+            locale="en-IN",
         )
         page = context.new_page()
+
+        # Warm-up: the clean app entry loads the authenticated SPA first.
+        # Meeting links opened cold hang on the migration/policy redirect.
+        logger.info("listener_warming_up_app_shell")
+        page.goto("https://teams.cloud.microsoft/", timeout=60_000)
+        page.wait_for_timeout(15_000)
+
         logger.info("listener_opening_meeting")
         page.goto(meeting_url, timeout=60_000)
-        page.wait_for_timeout(6000)
+        page.wait_for_timeout(8000)
 
         # Shortener/deep links land on a launcher: "Join your Teams meeting —
         # Continue on this browser | Join on the Teams app". The web client is
