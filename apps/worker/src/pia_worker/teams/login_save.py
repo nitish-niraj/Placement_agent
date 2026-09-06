@@ -17,6 +17,8 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
+from pia_worker.teams import is_teams_url
+
 # Host-run tool: .../apps/worker/src/pia_worker/teams/login_save.py → repo root
 # is five parents up. (This script never runs in a container.)
 _REPO_ROOT = Path(__file__).resolve().parents[5]
@@ -64,7 +66,7 @@ def main() -> None:
                              "button, CLICK IT first)")
                         prompted = True
                 on_login = _on_login_page(url)
-                if not on_login and "teams.microsoft" in url:
+                if not on_login and is_teams_url(url):
                     with contextlib.suppress(Exception):
                         sign_in_control = (
                             page.get_by_role("link", name="Sign in").count()

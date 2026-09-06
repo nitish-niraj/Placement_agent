@@ -27,6 +27,7 @@ from playwright.sync_api import sync_playwright
 from pia_shared.schemas import MeetingSummary
 from pia_worker.ai.provider import NIMProvider, ProviderError
 from pia_worker.settings import get_settings
+from pia_worker.teams import is_teams_url
 
 logger = structlog.get_logger()
 
@@ -172,7 +173,7 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
            join_now: bool = True) -> str:
     """Join the meeting, watch the chat for the feedback form, relay, leave."""
     meeting_url = _resolve_link(meeting_url)
-    if "teams.microsoft" not in meeting_url and "teams.live" not in meeting_url:
+    if not is_teams_url(meeting_url):
         return "not_a_teams_link"
     if not _STATE_FILE.exists():
         return "login_needed: run pia_worker.teams.login_save first"
