@@ -189,6 +189,19 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
         page.goto(meeting_url, timeout=60_000)
         page.wait_for_timeout(6000)
 
+        # Shortener/deep links land on a launcher: "Join your Teams meeting —
+        # Continue on this browser | Join on the Teams app". The web client is
+        # what the listener drives.
+        for label in ("Continue on this browser",
+                      "Continue on this device", "Fortfahren im Browser"):
+            try:
+                page.get_by_text(label, exact=False).first.click(timeout=3000)
+                logger.info("launcher_continue_clicked", label=label)
+                page.wait_for_timeout(5000)
+                break
+            except Exception:  # noqa: BLE001 — direct links skip the launcher
+                continue
+
         # Pre-join screen: ensure mic/camera are OFF, then Join.
         for toggle_label in ("camera", "mic", "Caméra", "Mikrofon"):
             try:
