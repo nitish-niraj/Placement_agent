@@ -155,9 +155,23 @@ def _summarize(transcript_text: str, form_link: str | None) -> str:
                 f"{head}{tail}")
 
 
+def _resolve_link(url: str) -> str:
+    """Follow URL shorteners (tinyurl etc.) to the real Teams meeting URL."""
+    try:
+        response = httpx.get(url, follow_redirects=True, timeout=20)
+        resolved = str(response.url)
+        if resolved != url:
+            logger.info("short_link_resolved", final=resolved[:80])
+        return resolved
+    except httpx.HTTPError as exc:
+        logger.warning("short_link_resolve_failed", error=str(exc)[:120])
+        return url  # the browser may still follow it
+
+
 def listen(meeting_url: str, *, max_minutes: int = 180,
            join_now: bool = True) -> str:
     """Join the meeting, watch the chat for the feedback form, relay, leave."""
+    meeting_url = _resolve_link(meeting_url)
     if "teams.microsoft" not in meeting_url and "teams.live" not in meeting_url:
         return "not_a_teams_link"
     if not _STATE_FILE.exists():
