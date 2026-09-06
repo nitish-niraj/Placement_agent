@@ -63,6 +63,8 @@ Where the two source docs conflict, the **Master Requirements doc wins**, except
 
 ### DEC-008 — KYC: detection and reminders in scope; KYC automation permanently excluded
 - **Decision:** KYC **sessions are detectable events** with reminders (FR-EVT-001 event type; P13 detection is future scope). **Automating KYC attendance/submission is excluded — not just from MVP, but from the product roadmap entirely.**
+
+**Amendment 2026-09-06 (owner decision, refines the scope):** KYC occurs twice — (1) an **informational company-arrival session** (no attendance register, no fine, feedback form filled manually by the owner) and (2) a **post-shortlist session** for selected candidates. For (2), automation is permanently excluded and attendance is always manual — it carries personal/evaluative value and identity stakes. For (1), the owner explicitly permits a **personal automated listener**: joining via the owner's own Microsoft credentials, capturing a summary (company, designation discussed) and the feedback-form link (relayed so the owner fills it personally), then leaving. Reminders and dossiers apply to both. The informational session has no attendance register to falsify and the owner consumes the intended benefit, so the misrepresentation concern does not arise there; the post-selection session remains the ethical line.
 - **Rationale:** Leaner doc Phase 5 and Section 7: a KYC session exists to verify identity; automating it misrepresents identity — an ethical line, not a convenience trade-off. Consistent with master ADR-008 (irreversible actions require approval).
 - **Consequence:** 01_PRD non-goals and 02_TRD action-engine guardrails must state this explicitly; no worker doc may design KYC automation.
 

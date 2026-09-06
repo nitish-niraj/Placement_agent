@@ -95,6 +95,7 @@ def render_event_alert(
     salary_package: str | None = None,
     job_location: str | None = None,
     eligibility_note: str | None = None,
+    links: list[str] | None = None,
 ) -> RenderedAlert:
     title = f"{company or 'General'} — {event_type.replace('_', ' ').upper()}"
     action = _ACTION_BY_TYPE.get(event_type, _ACTION_BY_TYPE["OTHER"])
@@ -107,6 +108,8 @@ def render_event_alert(
     # Drive-detail lines — the role/package facts that decide whether an
     # opportunity is worth acting on (owner feedback, 2026-09-06).
     detail_lines = ""
+    for link in (links or [])[:2]:
+        detail_lines += f"\n🔗 <b>Join/Link:</b> {html.escape(link)}"
     for emoji, label, value in (
         ("\U0001F4BC", "Role", designation),
         ("\U0001F4B0", "Package", salary_package),

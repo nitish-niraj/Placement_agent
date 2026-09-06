@@ -113,7 +113,10 @@ already performs this well.
    `ACTION_AUTOMATION_ENABLED` stays false per-capability until an ADR says
    otherwise.
 5. DEC-003: no outbound WhatsApp — the agent gets no such tool.
-6. DEC-008: KYC automation permanently excluded — reminders only.
+6. DEC-008 (amended 2026-09-06): the post-shortlist KYC session is **never**
+   automated — attendance is always manual. The informational company-arrival
+   session may be auto-attended by the owner's **personal listener** (own
+   credentials, summary + feedback-form relay, owner fills forms).
 7. Degradation ladder everywhere: tool-calling → JSON action fallback →
    P12 single-shot → raw evidence. A downed NIM degrades the agent; it never
    breaks the pipeline.

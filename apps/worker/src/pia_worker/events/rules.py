@@ -181,3 +181,14 @@ def extract_drive_fields(text: str) -> dict[str, str]:
         if key and value:
             fields.setdefault(key, value[:200])
     return fields
+
+
+# Microsoft Teams meeting links arrive URL-encoded and long; shorteners also occur.
+_TEAMS_LINK = re.compile(r"https?://teams\.[a-z.]+/[^\s<>]+", re.IGNORECASE)
+
+
+def extract_teams_link(text: str) -> str | None:
+    """The Teams meeting link from a KYC/announcement message (DEC-008 amendment:
+    the personal listener joins this). None when the message has none."""
+    match = _TEAMS_LINK.search(_WS.sub(" ", text or ""))
+    return match.group(0).rstrip(").,;") if match else None

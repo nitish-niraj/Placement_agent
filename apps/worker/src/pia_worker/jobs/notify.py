@@ -178,6 +178,7 @@ def notify_event(event_id: str, outcome: str = "created") -> str:
         salary_package=payload.get("salary_package"),
         job_location=payload.get("job_location"),
         eligibility_note=payload.get("eligibility_note"),
+        links=payload.get("links") or [],
         source_excerpt=payload.get("excerpt"),
         source_message_id=payload.get("source_message_id"),
         event_id=str(event["id"]),

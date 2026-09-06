@@ -33,3 +33,5 @@ Thumbs.db
 .vscode/
 apps/dashboard/dist/
 backups/
+infrastructure/teams_session.json
+infrastructure/teams_session.json
