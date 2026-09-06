@@ -106,3 +106,24 @@ class MatchResult(BaseModel):
     matched_identity_id: str | None = None  # profile id when status is MATCHED
     matched_row_index: int | None = None  # row provenance inside the source list
     rationale: str = ""  # deterministic explanation — never LLM output
+
+
+class AnswerCitation(BaseModel):
+    """Source pointer inside a conversational answer (F-028: source-backed
+    answers only). kind is 'message' | 'event' | 'eligibility'."""
+
+    kind: str
+    ref: str
+    quote: str | None = None
+
+
+class ConversationalAnswer(BaseModel):
+    """P12 conversational search output. The model may ONLY restate facts from
+    the retrieved context; validators and the API treat anything else as
+    unavailable. Informational by definition (ADR-003): an answer never
+    mutates eligibility/events state."""
+
+    answer: str
+    citations: list[AnswerCitation] = Field(default_factory=list)
+    says_unavailable: bool = False
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)

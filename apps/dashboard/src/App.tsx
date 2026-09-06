@@ -4,6 +4,7 @@ import { getToken, setToken, useApi, clearToken } from "./api";
 import { Companies, CompanyTimeline, Timeline } from "./screens/Companies";
 import { Documents, Eligibility, Inbox, Notifications } from "./screens/Lists";
 import { Audit, Profile, Settings } from "./screens/Profile";
+import { Ask } from "./screens/Ask";
 import { Overview } from "./screens/Overview";
 import { useHealth } from "./ui";
 
@@ -38,7 +39,7 @@ function Login({ onDone }: { onDone: () => void }) {
 }
 
 const NAV = [
-  ["/", "Overview"], ["/companies", "Companies"], ["/timeline", "Timeline"],
+  ["/", "Overview"], ["/ask", "Ask PIA"], ["/companies", "Companies"], ["/timeline", "Timeline"],
   ["/inbox", "Inbox"], ["/documents", "Documents"], ["/notifications", "Notifications"],
   ["/eligibility", "Eligibility"], ["/profile", "Profile"], ["/settings", "Settings"],
   ["/audit", "Audit"],
@@ -85,6 +86,7 @@ export default function App() {
       <Shell>
         <Routes>
           <Route path="/" element={<Overview />} />
+          <Route path="/ask" element={<Ask />} />
           <Route path="/companies" element={<Companies />} />
           <Route path="/companies/:id" element={<CompanyTimeline />} />
           <Route path="/timeline" element={<Timeline />} />

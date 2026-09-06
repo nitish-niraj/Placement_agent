@@ -105,6 +105,41 @@ class NIMProvider:
         ]
         return self._run(task, schema, messages, correlation_id, max_tokens)
 
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        """Embedding path (P12/F-028): batch texts -> vectors against the
+        OpenAI-compatible /embeddings endpoint. Uses EMBEDDING_MODEL
+        (nvidia/nemotron-3-embed-1b, 2048 dims — matches message_embeddings).
+        Raises ProviderError on any failure; callers fall back to keyword
+        retrieval (never fail the pipeline for an embedding)."""
+        settings = get_settings()
+        if not settings.nvidia_api_key:
+            raise ProviderError("NVIDIA_API_KEY not configured")
+        model = settings.embedding_model
+        started = time.time()
+        try:
+            response = self._client.post(
+                "/embeddings", json={"input": texts, "model": model},
+            )
+        except httpx.HTTPError as exc:
+            raise ProviderError(f"embeddings unreachable: {exc}") from exc
+        if response.status_code != 200:
+            raise ProviderError(
+                f"embeddings failed: {response.status_code} {response.text[:120]}"
+            )
+        body = response.json()
+        vectors = [item["embedding"] for item in body.get("data", [])]
+        if len(vectors) != len(texts):
+            raise ProviderError(
+                f"embeddings returned {len(vectors)} vectors for {len(texts)} inputs"
+            )
+        _log_ai_call("", "embeddings", model, Usage(
+            prompt_tokens=sum(len(t) // 4 for t in texts),
+            completion_tokens=0,
+            latency_ms=int((time.time() - started) * 1000),
+            validation="ok", call_id="",
+        ))
+        return vectors
+
     def complete_vision_structured(
         self,
         *,

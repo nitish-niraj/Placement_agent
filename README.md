@@ -88,3 +88,17 @@ Then open **http://localhost:8000/** and sign in with `DASHBOARD_TOKEN` (the
 multi-stage api Dockerfile builds `apps/dashboard` and serves the bundle at "/").
 Local UI development: `cd apps/dashboard && npm install && npm run dev`
 (proxies /api to localhost:8000).
+
+## Ask PIA (P12)
+
+Post a natural-language question — answers come strictly from stored data with
+message citations (pgvector semantic retrieval + deterministic keyword search;
+the LLM only phrases the answer and its failure path returns raw evidence):
+
+```bash
+curl -X POST http://localhost:8000/api/v1/ask   -H "Authorization: Bearer $DASHBOARD_TOKEN"   -H "Content-Type: application/json"   -d '{"question": "what is the TECHADEMY package and role?"}'
+```
+
+Also available as the "Ask PIA" screen in the dashboard. Embeddings refresh
+hourly with the maintenance sweep; ADR-003 applies — answers are informational
+and never mutate eligibility/events state.

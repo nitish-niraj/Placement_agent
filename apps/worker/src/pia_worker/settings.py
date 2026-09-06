@@ -47,7 +47,9 @@ class Settings(BaseSettings):
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
     llm_model: str = "mistralai/mistral-nemotron"
     llm_vision_model: str = "meta/llama-3.2-11b-vision-instruct"
+    embedding_model: str = "nvidia/nemotron-3-embed-1b"  # 2048 dims = message_embeddings
     llm_timeout_seconds: int = 45
+    ask_retrieve_k: int = 8  # P12 conversational search context size
 
     # SEC-005 kill switch — same refusal rule as the API.
     action_automation_enabled: bool = False

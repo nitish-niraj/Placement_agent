@@ -189,4 +189,10 @@ def deadline_state_sweep() -> dict[str, int]:
         counts["reminders_sent"] = deadline_escalations()["reminders_sent"]
     except Exception as exc:  # noqa: BLE001 — reminders never break the sweep
         logger.warning("escalation_pass_failed", error=str(exc)[:120])
+    try:
+        from pia_worker.jobs.embed_messages import embed_messages
+
+        counts["embedded"] = embed_messages()["embedded"]
+    except Exception as exc:  # noqa: BLE001 — embeddings never break the sweep
+        logger.warning("embed_pass_failed", error=str(exc)[:120])
     return counts

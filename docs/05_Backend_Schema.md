@@ -421,7 +421,7 @@ CREATE INDEX idx_audit_actor  ON audit_logs (actor, created_at DESC);
 CREATE EXTENSION IF NOT EXISTS vector;
 CREATE TABLE message_embeddings (
   message_id  uuid PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
-  embedding   vector(1024) NOT NULL,
+  embedding   vector(2048) NOT NULL,
   model       text NOT NULL,
   created_at  timestamptz NOT NULL DEFAULT now()
 );

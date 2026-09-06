@@ -8,6 +8,7 @@ notifications into one evidence-backed history (FR-DED-005).
 
 import sqlalchemy
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 
 from pia_api.db import get_engine
 from pia_api.deps import require_dashboard_token
@@ -262,6 +263,24 @@ def list_audit(limit: int = 200) -> dict:
             {"lim": min(limit, 1000)},
         ).mappings().all()
     return {"audit": [dict(r) for r in rows]}
+
+
+class AskRequest(BaseModel):
+    question: str = Field(min_length=3, max_length=500)
+
+
+@router.post("/ask")
+def ask(payload: AskRequest) -> dict:
+    """F-028 conversational search: source-backed answers over stored data.
+
+    NOTE: imports pia_worker.search directly — interactive request/response
+    needs in-process retrieval, and the api image already ships the worker
+    package (pip install .). The async job-string rule is unaffected.
+    ADR-003: informational only — answers never mutate authoritative state.
+    """
+    from pia_worker.search.answer import ask_question
+
+    return ask_question(payload.question.strip())
 
 
 @router.get("/metrics")
