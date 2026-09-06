@@ -217,7 +217,18 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
             except Exception:  # noqa: BLE001
                 continue
         if not joined:
-            logger.warning("listener_join_button_not_found")
+            # Diagnostics: screenshot + visible text so join failures are
+            # always explainable (ended meeting, lobby, permission wall…).
+            diag = _TRANSCRIPT_DIR / (
+                "join_failed_" + datetime.now().strftime("%Y%m%d_%H%M%S"))
+            diag.parent.mkdir(parents=True, exist_ok=True)
+            with contextlib.suppress(Exception):
+                page.screenshot(path=str(diag) + ".png")
+                body = (page.text_content("body") or "").replace("\n", " ")[:300]
+                (diag.with_suffix(".txt")).write_text(
+                    f"url: {page.url}\ntitle: {page.title()}\nbody: {body}",
+                    encoding="utf-8")
+            logger.warning("listener_join_button_not_found", diag=str(diag))
             browser.close()
             return "join_failed"
         logger.info("listener_joined")
