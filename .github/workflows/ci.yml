@@ -37,4 +37,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build images
+        # Build-time interpolation only — the fail-closed required vars are
+        # satisfied with placeholders; real secrets live only in deployment .env.
         run: docker compose -f infrastructure/docker-compose.yml build api worker
+        env:
+          EVOLUTION_API_KEY: ci-build-placeholder
+          EVOLUTION_WEBHOOK_SECRET: ci-build-placeholder
