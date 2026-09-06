@@ -43,30 +43,46 @@ def main() -> None:
              "'Stay signed in').")
         _say("Teams loads → saved automatically. Ctrl+C after you're in also works.")
 
-        # Auto-detect (sustained-stability rule): anonymous visitors sit on
-        # teams.microsoft.com/v2/ for only a few seconds before a client-side
-        # bounce to login.microsoftonline. A SIGNED-IN session stays on the
-        # Teams domain — so the URL must hold there for 20 continuous seconds.
+        # Auto-detect (two-signal rule): the /v2/ landing page can sit on the
+        # Teams domain with a "Sign in" button for anonymous visitors — so the
+        # URL must hold for 20 continuous seconds AND no "Sign in" control may
+        # be visible in the DOM. The authenticated app has neither.
         deadline = time.time() + 300
         signed_in = False
         last_reported: str | None = None
         stable_since: float | None = None
+        prompted = False
         try:
             while time.time() < deadline:
                 url = page.url
                 if url != last_reported:
                     _say(f"  current page: {url[:100]}")
                     last_reported = url
-                    if _on_login_page(url):
-                        _say("  (if a 'Stay signed in?' prompt is showing, click Yes)")
+                    if _on_login_page(url) and not prompted:
+                        _say("  (complete ID + password + MFA; click Yes on "
+                             "'Stay signed in'; if the page shows a Sign in "
+                             "button, CLICK IT first)")
+                        prompted = True
                 on_login = _on_login_page(url)
                 if not on_login and "teams.microsoft" in url:
-                    if stable_since is None:
-                        stable_since = time.time()
-                    elif time.time() - stable_since >= 20:
-                        signed_in = True
-                        _say("Signed-in state confirmed (20s stable) — saving.")
-                        break
+                    with contextlib.suppress(Exception):
+                        sign_in_control = (
+                            page.get_by_role("link", name="Sign in").count()
+                            + page.get_by_role("button", name="Sign in").count())
+                    if sign_in_control > 0:
+                        stable_since = None
+                        if not prompted:
+                            _say('Landing page shows "Sign in" — click it and '
+                                 "complete the login.")
+                            prompted = True
+                    else:
+                        if stable_since is None:
+                            stable_since = time.time()
+                        elif time.time() - stable_since >= 20:
+                            signed_in = True
+                            _say("Signed-in app confirmed (20s, no Sign in "
+                                 "control) — saving.")
+                            break
                 else:
                     stable_since = None
                 time.sleep(2)
