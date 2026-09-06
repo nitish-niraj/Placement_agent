@@ -43,41 +43,50 @@ def main() -> None:
              "'Stay signed in').")
         _say("Teams loads → saved automatically. Ctrl+C after you're in also works.")
 
-        # Auto-detect: URL leaves the login pages and sits on teams.microsoft.
+        # Auto-detect (sustained-stability rule): anonymous visitors sit on
+        # teams.microsoft.com/v2/ for only a few seconds before a client-side
+        # bounce to login.microsoftonline. A SIGNED-IN session stays on the
+        # Teams domain — so the URL must hold there for 20 continuous seconds.
         deadline = time.time() + 300
-        interrupted = False
         signed_in = False
         last_reported: str | None = None
+        stable_since: float | None = None
         try:
             while time.time() < deadline:
                 url = page.url
                 if url != last_reported:
                     _say(f"  current page: {url[:100]}")
                     last_reported = url
-                    if "login.microsoftonline" in url:
+                    if _on_login_page(url):
                         _say("  (if a 'Stay signed in?' prompt is showing, click Yes)")
                 on_login = _on_login_page(url)
                 if not on_login and "teams.microsoft" in url:
-                    time.sleep(4)  # let the app shell settle
-                    if not _on_login_page(page.url):
+                    if stable_since is None:
+                        stable_since = time.time()
+                    elif time.time() - stable_since >= 20:
                         signed_in = True
-                        _say("Signed-in state detected — saving.")
+                        _say("Signed-in state confirmed (20s stable) — saving.")
                         break
+                else:
+                    stable_since = None
                 time.sleep(2)
         except KeyboardInterrupt:
-            interrupted = True
-            _say("Interrupted — saving session if you are signed in…")
+            # Ctrl+C = "I'm in, save now" — but verify with a fresh navigation:
+            # an anonymous visitor bounces to login within seconds; signed-in
+            # stays. This is what prevents saving a junk session again.
+            _say("Interrupted — verifying you are really signed in…")
+            with contextlib.suppress(Exception):
+                page.goto("https://teams.microsoft.com/v2/", timeout=30_000)
+                time.sleep(8)
 
-        # Final evaluation works for both the auto-detect and the Ctrl+C path.
         try:
             url = page.url
         except Exception:  # noqa: BLE001 — browser already gone
             url = ""
+        signed_in = (
+            bool(url) and "teams.microsoft" in url and not _on_login_page(url))
         if not signed_in:
-            signed_in = bool(url) and (
-                "teams.microsoft" in url and not _on_login_page(url))
-        if not signed_in:
-            _say("Not signed in (or still on a login page) — nothing saved. "
+            _say("Not signed in (bounced to the login wall) — nothing saved. "
                  "Complete the login and try again.")
             with contextlib.suppress(Exception):
                 browser.close()
@@ -85,8 +94,7 @@ def main() -> None:
 
         context.storage_state(path=str(_STATE_FILE))
         _say(f"Signed in — session saved: {_STATE_FILE} "
-             f"({_STATE_FILE.stat().st_size} bytes)"
-             + (" (saved via Ctrl+C)" if interrupted else ""))
+             f"({_STATE_FILE.stat().st_size} bytes)")
         with contextlib.suppress(Exception):
             browser.close()
 
