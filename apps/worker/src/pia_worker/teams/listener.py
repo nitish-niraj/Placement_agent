@@ -122,27 +122,61 @@ def _open_chat_panel(page) -> None:
         page.wait_for_timeout(1500)
 
 
+def _dump_controls(page, tag: str) -> list[str]:
+    """Diagnostic: every visible button/menuitem label — saved to the transcripts
+    dir so the exact control names are known for precise clicking."""
+    labels: list[str] = []
+    try:
+        elements = page.query_selector_all("button, [role=menuitem], [role=button]")
+        for el in elements:
+            with contextlib.suppress(Exception):
+                if not el.is_visible():
+                    continue
+                label = ((el.get_attribute("aria-label")
+                          or el.text_content() or "").strip())
+                if label and len(label) < 60:
+                    labels.append(label)
+    except Exception:  # noqa: BLE001 — diagnostics are best-effort
+        pass
+    if labels:
+        dump = _TRANSCRIPT_DIR / f"controls_{tag}_{datetime.now().strftime('%H%M%S')}.txt"
+        dump.parent.mkdir(parents=True, exist_ok=True)
+        dump.write_text("\n".join(dict.fromkeys(labels)), encoding="utf-8")
+    return labels
+
+
 def _try_enable_captions(page) -> bool:
-    """Attempt to turn on live captions via the More options menu. Best-effort:
-    the light-meetings UI keeps the toggle under 'More' → 'Turn on live
-    captions' (or the CC button when present)."""
-    for more_label in ("More", "More actions"):
+    """Turn on live captions. Two strategies, diagnostics in between:
+    1. direct CC/captions control anywhere on the page (aria-label or text);
+    2. open More ('…') menus and look inside them.
+    All visible controls are dumped first so failures are debuggable."""
+    controls = _dump_controls(page, "joined")
+    # strategy 1: a direct captions control on the page
+    for label in ("Turn on live captions", "Turn on captions", "Live captions",
+                  "Captions", "CC"):
+        with contextlib.suppress(Exception):
+            btn = page.get_by_role("button", name=label, exact=False).first
+            btn.click(timeout=1500)
+            logger.info("captions_enabled", via="direct", label=label)
+            page.wait_for_timeout(1500)
+            return True
+    # strategy 2: open every 'More'-ish menu and search inside
+    for more_label in ("More options", "More", "More actions"):
         with contextlib.suppress(Exception):
             page.get_by_role("button", name=more_label, exact=False).first.click(
                 timeout=2000)
-            page.wait_for_timeout(800)
+            page.wait_for_timeout(1000)
+            _dump_controls(page, "menu")
             for label in ("Turn on live captions", "Turn on captions",
                           "Live captions", "Captions"):
-                try:
+                with contextlib.suppress(Exception):
                     page.get_by_text(label, exact=False).first.click(timeout=2000)
-                    logger.info("captions_enabled")
+                    logger.info("captions_enabled", via="menu", label=label)
                     page.wait_for_timeout(1500)
                     return True
-                except Exception:  # noqa: BLE001
-                    continue
             with contextlib.suppress(Exception):
                 page.keyboard.press("Escape")
-    logger.warning("captions_enable_attempted_unclear")
+    logger.warning("captions_enable_failed", visible_controls=len(controls))
     return False
 
 
