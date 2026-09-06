@@ -55,14 +55,15 @@ DEADLINE_CONTEXT = re.compile(
     re.IGNORECASE,
 )
 OCCURRENCE_CONTEXT = re.compile(
-    r"\b(reporting date|reporting time|scheduled|schedule|on \d|declared|held|"
-    r"date:|time:|venue:|at \d{1,2}[:.]?\d{0,2}\s*(am|pm))\b",
+    r"(?:reporting date|reporting time|scheduled|schedule|on\s+\d|declared|held|"
+    r"date:|time:|venue:|at\s+\d{1,2}[:.]?\d{0,2}\s*(?:am|pm))",
     re.IGNORECASE,
 )
 
 # LPU drive codes: "*COMPANY NAME* OC.41702.2027.63186" (also TC.) — mirrors
 # the P5 file-name pattern (documents/orchestrator.company_from_file_name).
-_DRIVE_CODE = re.compile(r"\b(?:OC|TC)\.\d{4,}", re.IGNORECASE)
+# Some cells use the comma form: "*KRAFTSHALA,63572*".
+_DRIVE_CODE = re.compile(r"\b(?:OC|TC)\.\d{4,}|,\s?\d{5,6}\b", re.IGNORECASE)
 
 # Lowercase connectors allowed INSIDE a company name; other lowercase words
 # are prose and end the backward walk ("...shortlisted the selection process
@@ -90,11 +91,12 @@ def detect_event_type(text: str) -> EventType | None:
 
 
 def detect_deadline_context(text: str) -> bool:
-    return bool(DEADLINE_CONTEXT.search(text or ""))
+    # WhatsApp bold markers ("*5th September*") break label heuristics — strip.
+    return bool(DEADLINE_CONTEXT.search((text or "").replace("*", " ")))
 
 
 def detect_occurrence_context(text: str) -> bool:
-    return bool(OCCURRENCE_CONTEXT.search(text or ""))
+    return bool(OCCURRENCE_CONTEXT.search((text or "").replace("*", " ")))
 
 
 def extract_company_from_text(text: str) -> str | None:
@@ -184,7 +186,9 @@ def extract_drive_fields(text: str) -> dict[str, str]:
 
 
 # Microsoft Teams meeting links arrive URL-encoded and long; shorteners also occur.
-_TEAMS_LINK = re.compile(r"https?://teams\.[a-z.]+/[^\s<>]+", re.IGNORECASE)
+_TEAMS_LINK = re.compile(
+    r"https?://(?:teams\.[a-z.]+|(?:www\.)?(?:tinyurl\.com|bit\.ly|shorturl\.at|t\.ly))"
+    r"/[^\s<>]+", re.IGNORECASE)
 
 
 def extract_teams_link(text: str) -> str | None:

@@ -32,7 +32,8 @@ _EMOJI = {
 _ACTION_BY_TYPE = {
     "REGISTRATION": "Complete the registration before the deadline",
     "FORM": "Fill and submit the form before the deadline",
-    "KYC": "Attend the KYC session — it cannot be done on your behalf (DEC-008)",
+    "KYC": "Join via the link if you can — otherwise the listener attends " +
+          "and sends you the summary + feedback form (DEC-008 amendment)",
     "OA": "Prepare for and attend the online assessment",
     "EXAM": "Check the exam schedule and prepare accordingly",
     "INTERVIEW": "Report on time with the documents listed",

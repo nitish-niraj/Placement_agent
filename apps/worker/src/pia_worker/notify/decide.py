@@ -61,7 +61,8 @@ def priority_for_event(ctx: EventContext, now: datetime | None = None) -> Decisi
 
     if ctx.event_type is EventType.KYC:
         return Decision(NotificationPriority.CRITICAL, "immediate",
-                        "Mandatory KYC is a compliance step no one can attend for you")
+                        "Company arrival session — your listener can join and brief you; " +
+                        "post-selection sessions you always attend yourself (DEC-008)")
     if ctx.deadline_at is not None and ctx.deadline_at.astimezone(IST).date() \
             == now_ist.date():
         base = "Deadline is TODAY"
