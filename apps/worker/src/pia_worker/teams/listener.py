@@ -208,9 +208,13 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
         for label in ("Continue on this browser",
                       "Continue on this device", "Fortfahren im Browser"):
             try:
-                page.get_by_text(label, exact=False).first.click(timeout=3000)
-                logger.info("launcher_continue_clicked", label=label)
-                page.wait_for_timeout(5000)
+                with context.expect_page(timeout=6000) as popup_info:
+                    page.get_by_text(label, exact=False).first.click(timeout=3000)
+                # "Continue on this browser" opens the meeting in a NEW TAB —
+                # the launcher page stays behind. Switch to the new tab.
+                page = popup_info.value
+                logger.info("launcher_continue_clicked", new_tab=True)
+                page.wait_for_timeout(6000)
                 break
             except Exception:  # noqa: BLE001 — direct links skip the launcher
                 continue
@@ -325,3 +329,22 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
     logger.info("listener_done", forms_relayed=len(relayed),
                 transcript=str(transcript_file))
     return f"done:{len(relayed)}:form_links:transcript={transcript_file.name}"
+
+
+def main() -> None:
+    """CLI: .venv/Scripts/python -m pia_worker.teams.listener "<meeting link>"
+    [--minutes N] — joins, watches chat for the feedback form, leaves."""
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Type-1 KYC personal listener (DEC-008 amendment)")
+    parser.add_argument("url", help="Teams meeting link (any domain/shortener)")
+    parser.add_argument("--minutes", type=int, default=180,
+                        help="max minutes to stay in the meeting")
+    args = parser.parse_args()
+    result = listen(args.url, max_minutes=args.minutes)
+    print(result)
+
+
+if __name__ == "__main__":
+    main()
