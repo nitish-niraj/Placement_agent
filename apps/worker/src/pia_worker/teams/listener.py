@@ -169,10 +169,32 @@ def _resolve_link(url: str) -> str:
         return url  # the browser may still follow it
 
 
+def _direct_meeting_url(launcher_url: str) -> str:
+    """Skip the launcher entirely: the /dl/launcher page encodes the real
+    meeting URL in its ?url= parameter ("/_#/meet/<id>?p=<passcode>"). Navigating
+    there directly avoids the launcher's ms-teams: app deep-link, whose native
+    Chromium dialog ("Open URL:ms-teams?") blocks automation. Anonymous join is
+    requested for personal links (the guest name is filled in the pre-join)."""
+    from urllib.parse import parse_qs, unquote, urlparse
+
+    parsed = urlparse(launcher_url)
+    inner = parse_qs(parsed.query).get("url", [None])[0]
+    if not inner:
+        return launcher_url
+    decoded = unquote(inner)
+    if not decoded.startswith("/"):
+        return launcher_url
+    direct = f"{parsed.scheme}://{parsed.netloc}{decoded}"
+    if "anon=" not in decoded and "teams.live" in parsed.netloc:
+        direct += "&anon=true"
+    logger.info("direct_meeting_url", url=direct[:90])
+    return direct
+
+
 def listen(meeting_url: str, *, max_minutes: int = 180,
            join_now: bool = True) -> str:
     """Join the meeting, watch the chat for the feedback form, relay, leave."""
-    meeting_url = _resolve_link(meeting_url)
+    meeting_url = _direct_meeting_url(_resolve_link(meeting_url))
     if not is_teams_url(meeting_url):
         return "not_a_teams_link"
     if not _STATE_FILE.exists():
