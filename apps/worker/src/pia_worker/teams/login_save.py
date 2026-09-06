@@ -73,8 +73,9 @@ def main() -> None:
             url = page.url
         except Exception:  # noqa: BLE001 — browser already gone
             url = ""
-        signed_in = signed_in or (
-            url and "teams.microsoft" in url and not _on_login_page(url))
+        if not signed_in:
+            signed_in = bool(url) and (
+                "teams.microsoft" in url and not _on_login_page(url))
         if not signed_in:
             _say("Not signed in (or still on a login page) — nothing saved. "
                  "Complete the login and try again.")
