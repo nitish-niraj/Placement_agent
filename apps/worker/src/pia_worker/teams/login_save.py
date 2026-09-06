@@ -49,7 +49,7 @@ def main() -> None:
         # Teams domain with a "Sign in" button for anonymous visitors — so the
         # URL must hold for 20 continuous seconds AND no "Sign in" control may
         # be visible in the DOM. The authenticated app has neither.
-        deadline = time.time() + 300
+        deadline = time.time() + 600  # 10 minutes: take your time on MFA
         signed_in = False
         last_reported: str | None = None
         stable_since: float | None = None
