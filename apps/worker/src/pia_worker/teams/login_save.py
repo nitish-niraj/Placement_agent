@@ -38,11 +38,18 @@ def main() -> None:
         # was the bug — it matches before login and saves an empty session.
         deadline = time.time() + 300
         signed_in = False
+        last_reported: str | None = None
         while time.time() < deadline:
             url = page.url
-            if ("login.microsoftonline" not in url and "login.live" not in url
-                    and "/signin" not in url and "/v2/" in url):
-                page.wait_for_timeout(4000)  # let the app shell settle
+            if url != last_reported:
+                print(f"  current page: {url[:100]}")
+                last_reported = url
+                if "login.microsoftonline" in url:
+                    print("  (if a 'Stay signed in?' prompt is showing, click Yes)")
+            on_login = ("login.microsoftonline" in url or "login.live" in url
+                        or "/signin" in url)
+            if not on_login and "teams.microsoft" in url:
+                page.wait_for_timeout(5000)  # let the app shell settle
                 if "login" not in page.url:
                     signed_in = True
                     break
