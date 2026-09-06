@@ -75,13 +75,20 @@ def _extract_chat_links(page) -> list[str]:
     if _FORM_RE is None:
         _FORM_RE = _re.compile(_FORM_LINK)
     links: list[str] = []
+    # Page-wide anchor scan: form links are caught wherever they render —
+    # meeting chat pane, link cards, captions, anywhere (light-meetings UI
+    # uses different chat DOM than the main app, so pane targeting is fragile).
+    try:
+        for a in page.query_selector_all("a[href]"):
+            href = a.get_attribute("href") or ""
+            if _FORM_RE.search(href):
+                links.append(href)
+    except Exception:  # noqa: BLE001 — DOM shifts are expected
+        pass
+    # Text-based scan for links pasted as plain text inside chat messages.
     for selector in _CHAT_SELECTORS:
         try:
             for el in page.query_selector_all(selector):
-                for a in el.query_selector_all("a[href]"):
-                    href = a.get_attribute("href") or ""
-                    if _FORM_RE.search(href):
-                        links.append(href)
                 text = (el.text_content() or "")
                 for m in _FORM_RE.finditer(text):
                     links.append(m.group(0))
@@ -105,17 +112,36 @@ def _extract_captions(page, seen: set[str]) -> list[str]:
     return new
 
 
-def _try_enable_captions(page) -> bool:
-    """Attempt to turn on live captions (More options menu). Best-effort."""
+def _open_chat_panel(page) -> None:
+    """Open the meeting Chat panel (best-effort) — in the light-meetings UI
+    the chat stays collapsed until clicked, and an unrendered pane hides
+    messages from the DOM."""
     with contextlib.suppress(Exception):
-        page.get_by_role("button", name="More", exact=False).first.click(timeout=2000)
-        for label in ("Turn on live captions", "Live captions"):
-            try:
-                page.get_by_text(label, exact=False).first.click(timeout=2000)
-                logger.info("captions_enabled")
-                return True
-            except Exception:  # noqa: BLE001
-                continue
+        page.get_by_role("button", name="Chat", exact=False).first.click(timeout=2500)
+        logger.info("chat_panel_opened")
+        page.wait_for_timeout(1500)
+
+
+def _try_enable_captions(page) -> bool:
+    """Attempt to turn on live captions via the More options menu. Best-effort:
+    the light-meetings UI keeps the toggle under 'More' → 'Turn on live
+    captions' (or the CC button when present)."""
+    for more_label in ("More", "More actions"):
+        with contextlib.suppress(Exception):
+            page.get_by_role("button", name=more_label, exact=False).first.click(
+                timeout=2000)
+            page.wait_for_timeout(800)
+            for label in ("Turn on live captions", "Turn on captions",
+                          "Live captions", "Captions"):
+                try:
+                    page.get_by_text(label, exact=False).first.click(timeout=2000)
+                    logger.info("captions_enabled")
+                    page.wait_for_timeout(1500)
+                    return True
+                except Exception:  # noqa: BLE001
+                    continue
+            with contextlib.suppress(Exception):
+                page.keyboard.press("Escape")
     logger.warning("captions_enable_attempted_unclear")
     return False
 
@@ -302,6 +328,7 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
             browser.close()
             return "join_failed"
         logger.info("listener_joined")
+        _open_chat_panel(page)      # form links land in the meeting chat
         _try_enable_captions(page)
 
         transcript_file = _TRANSCRIPT_DIR / (
