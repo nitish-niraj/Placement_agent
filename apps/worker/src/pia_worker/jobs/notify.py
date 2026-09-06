@@ -128,7 +128,27 @@ def notify_event(event_id: str, outcome: str = "created") -> str:
     )
     key = dedup_key(str(event["id"]), state_hash)
 
-    if decision.delivery == "digest":
+    # Master §11 policy flags (env): NOTIFY_CRITICAL_IMMEDIATELY /
+    # NOTIFY_MEDIUM_IN_DIGEST — deployment owners may route critical items to
+    # the digest or switch digest items off entirely.
+    settings = get_settings()
+    delivery = decision.delivery
+    if delivery == "immediate" and not settings.notify_critical_immediately:
+        delivery = "digest"
+    if delivery == "digest" and not settings.notify_medium_in_digest:
+        with engine.begin() as conn:
+            notify_records.insert_notification(
+                conn, dedup_key=key, priority=decision.priority,
+                reason=decision.reason + " (suppressed: digest disabled by policy)",
+                payload={"outcome": outcome, "policy": "NOTIFY_MEDIUM_IN_DIGEST=false"},
+                evidence_refs=[], event_id=str(event["id"]),
+                message_id=payload.get("source_message_id"),
+                status=NotificationStatus.SUPPRESSED,
+            )
+        logger.info("notification_suppressed_policy", event_id=event_id)
+        return "suppressed_policy"
+
+    if delivery == "digest":
         with engine.begin() as conn:
             notification_id, is_new = notify_records.insert_notification(
                 conn, dedup_key=key, priority=decision.priority,

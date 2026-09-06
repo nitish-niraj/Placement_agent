@@ -356,14 +356,57 @@ def download_attachment(attachment_id: str) -> str:
 
 
 def retention_cleanup() -> dict[str, int]:
+    """SEC-007: raw payloads (raw-message retention) and downloaded attachments
+    (document retention) are hard-deleted when their retention expires.
+    Derived facts (eligibility, events, extractions) are never auto-deleted
+    (02_TRD §5)."""
     settings = get_settings()
-    cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(days=settings.raw_message_retention_days)
+    now = dt.datetime.now(dt.UTC)
+    raw_cutoff = now - dt.timedelta(days=settings.raw_message_retention_days)
+    doc_cutoff = now - dt.timedelta(days=settings.document_retention_days)
     engine = _engine()
+
     with engine.begin() as conn:
         result = conn.execute(
             sqlalchemy.text("DELETE FROM raw_event_payloads WHERE retention_expires_at < :c"),
-            {"c": cutoff},
+            {"c": raw_cutoff},
         )
-        deleted = result.rowcount or 0
-    logger.info("retention_cleanup_done", deleted_raw_payloads=deleted, cutoff=cutoff.isoformat())
-    return {"deleted_raw_payloads": deleted}
+        deleted_raw = result.rowcount or 0
+        expired = conn.execute(
+            sqlalchemy.text(
+                "SELECT id, storage_key FROM attachments "
+                "WHERE retention_expires_at IS NOT NULL "
+                "AND retention_expires_at < :c AND processing_state != 'PENDING'"
+            ),
+            {"c": doc_cutoff},
+        ).mappings().all()
+
+    # MinIO objects first (network I/O outside the transaction), then rows.
+    deleted_objects = 0
+    if expired:
+        client = _minio_client()
+        object_errors = 0
+        for row in expired:
+            if not row["storage_key"]:
+                continue
+            try:
+                client.remove_object(settings.minio_bucket, row["storage_key"])
+                deleted_objects += 1
+            except Exception as exc:  # noqa: BLE001 — already gone is fine
+                object_errors += 1
+                logger.warning("retention_object_missing", key=row["storage_key"],
+                               error=str(exc)[:120])
+        if object_errors < len(expired):  # only purge rows whose objects are gone
+            with engine.begin() as conn:
+                conn.execute(
+                    sqlalchemy.text(
+                        "DELETE FROM attachments WHERE retention_expires_at IS NOT NULL "
+                        "AND retention_expires_at < :c"
+                    ),
+                    {"c": doc_cutoff},
+                )
+
+    logger.info("retention_cleanup_done", deleted_raw_payloads=deleted_raw,
+                expired_attachments=len(expired), deleted_objects=deleted_objects,
+                raw_cutoff=raw_cutoff.isoformat(), doc_cutoff=doc_cutoff.isoformat())
+    return {"deleted_raw_payloads": deleted_raw, "expired_attachments": len(expired)}

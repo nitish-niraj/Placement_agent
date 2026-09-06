@@ -6,6 +6,8 @@ company timeline merges events, event updates, eligibility records and
 notifications into one evidence-backed history (FR-DED-005).
 """
 
+import json
+
 import sqlalchemy
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -215,8 +217,10 @@ def list_notifications(limit: int = 100) -> dict:
 
 
 @router.get("/messages")
-def list_messages(limit: int = 100, important_only: bool = True) -> dict:
-    """Inbox (master §17): AI-filtered important messages with evidence."""
+def list_messages(limit: int = 100, important_only: bool = True,
+                  query: str | None = None) -> dict:
+    """Inbox (master §17): AI-filtered important messages with evidence;
+    optional free-text search over message bodies (GET /messages contract)."""
     engine = get_engine()
     with engine.connect() as conn:
         rows = conn.execute(
@@ -228,9 +232,12 @@ def list_messages(limit: int = 100, important_only: bool = True) -> dict:
                 "WHERE m.text IS NOT NULL "
                 "AND (:important_only = false OR (m.importance IN ('HIGH','CRITICAL') "
                 "AND g.enabled)) "
+                "AND (CAST(:query AS text) IS NULL OR m.text ILIKE :query) "
                 "ORDER BY m.sent_at DESC LIMIT :lim"
             ),
-            {"important_only": important_only, "lim": min(limit, 500)},
+            {"important_only": important_only,
+             "query": f"%{query}%" if query else None,
+             "lim": min(limit, 500)},
         ).mappings().all()
     return {"messages": [dict(r) for r in rows]}
 
@@ -248,6 +255,55 @@ def list_groups() -> dict:
             )
         ).mappings().all()
     return {"groups": [dict(r) for r in rows]}
+
+
+class GroupUpdate(BaseModel):
+    enabled: bool | None = None
+    category: str | None = None
+    priority: int | None = Field(default=None, ge=1, le=10)
+
+
+@router.patch("/groups/{group_id}")
+def update_group(group_id: str, payload: GroupUpdate) -> dict:
+    """FR-WA-004/005: owner controls over the allowlist — enable/disable,
+    category, priority. Every change is audited (SEC-004)."""
+    from pia_shared.enums import GroupCategory
+
+    changes = payload.model_dump(exclude_none=True)
+    if not changes:
+        raise HTTPException(status_code=422, detail="no fields to update")
+    if "category" in changes:
+        try:
+            GroupCategory(changes["category"])
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="invalid category") from exc
+
+    engine = get_engine()
+    with engine.begin() as conn:
+        row = conn.execute(
+            sqlalchemy.text(
+                "UPDATE groups SET enabled = COALESCE(:enabled, enabled), "
+                "category = COALESCE(CAST(:category AS group_category), category), "
+                "priority = COALESCE(:priority, priority), updated_at = now() "
+                "WHERE id = CAST(:id AS uuid) "
+                "RETURNING id, name, enabled, category, priority"
+            ),
+            {"id": group_id, "enabled": changes.get("enabled"),
+             "category": changes.get("category"),
+             "priority": changes.get("priority")},
+        ).mappings().first()
+        if row is None:
+            raise HTTPException(status_code=404, detail="group not found")
+        conn.execute(
+            sqlalchemy.text(
+                "INSERT INTO audit_logs (actor, action, entity_type, entity_id, "
+                "result, metadata) VALUES ('user', 'groups.update', 'groups', "
+                "CAST(:id AS uuid), 'ok', CAST(:meta AS jsonb))"
+            ),
+            {"id": group_id,
+             "meta": json.dumps({"changes": changes}, default=str)},
+        )
+    return {"group": dict(row)}
 
 
 @router.get("/audit")

@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     # Policy
     media_max_size_mb: int = 25
     raw_message_retention_days: int = 90  # §22 / 02_TRD §11 (Q7 default)
+    document_retention_days: int = 365  # attachments/media lifecycle (SEC-007)
     # P9 dedup windows + threshold (measured on the live corpus — see
     # docs/08_P9_Dedup_Evaluation.md; ADR-009 discipline: never invented)
     dedup_near_window_hours: int = 48

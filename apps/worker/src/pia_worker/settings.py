@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     evolution_api_key: str = ""
     media_max_size_mb: int = 25
     raw_message_retention_days: int = 90
+    document_retention_days: int = 365  # media/attachments (SEC-007)
     vision_confidence_floor: float = 0.75  # provisional; tuned in P6 (ADR-009)
 
     # Identity matching thresholds (TRD §6, ADR-009): tuned on the P6 fixture
@@ -60,6 +61,9 @@ class Settings(BaseSettings):
     digest_hour: int = 20  # 20:30 Asia/Kolkata default (TRD §8)
     digest_minute: int = 30
     notify_send_attempts: int = 3  # RQ retries before PENDING_DELIVERY
+    # master §11 policy flags (wire-up completed in the fixed-code backlog)
+    notify_critical_immediately: bool = True
+    notify_medium_in_digest: bool = True
 
     @model_validator(mode="after")
     def enforce_action_kill_switch(self) -> "Settings":

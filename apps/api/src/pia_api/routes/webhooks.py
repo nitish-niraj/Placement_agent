@@ -287,10 +287,13 @@ def _handle_message_upsert(
             mime_type, file_name = media
             attachment_row = conn.execute(
                 text(
-                    "INSERT INTO attachments (message_id, mime_type, file_name) "
-                    "VALUES (:mid, :mime, :fname) RETURNING id"
+                    "INSERT INTO attachments (message_id, mime_type, file_name, "
+                    "retention_expires_at) "
+                    "VALUES (:mid, :mime, :fname, :retention) RETURNING id"
                 ),
-                {"mid": inserted.id, "mime": mime_type, "fname": file_name},
+                {"mid": inserted.id, "mime": mime_type, "fname": file_name,
+                 "retention": dt.datetime.now(dt.UTC) + dt.timedelta(
+                     days=settings.document_retention_days)},
             ).one()
             attachment_id = str(attachment_row.id)
 
