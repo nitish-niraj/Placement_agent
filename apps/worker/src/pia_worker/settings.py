@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     default_job_retries: int = 5
     maintenance_interval_hours: int = 24
     deadline_sweep_interval_minutes: int = 60  # DUE_SOON/EXPIRED precision (F-020)
+    # Teams listener (DEC-008 amendment): login popup credentials
+    teams_email: str = ""
+    teams_password: str = ""
     app_timezone: str = "Asia/Kolkata"  # master §22: all timestamps stored UTC, resolved here
 
     # Job targets (P2: persistence, media, retention)
