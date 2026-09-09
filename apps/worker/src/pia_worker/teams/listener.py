@@ -335,8 +335,8 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
         name_filled_pages: set[int] = set()
         joined_with_media_on = False
         signed_in_on_prejoin = False
-        join_deadline = time.time() + 90
-        while time.time() < join_deadline and joined_page is page and not joined:
+        join_deadline = time.time() + 150  # sign-in adds a hop; poll longer
+        while time.time() < join_deadline and not joined:
             for candidate in context.pages:
                 if "/dl/launcher" in candidate.url:
                     continue  # the chooser itself — nothing to join here
