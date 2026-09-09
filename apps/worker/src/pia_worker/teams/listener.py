@@ -112,6 +112,31 @@ def _extract_captions(page, seen: set[str]) -> list[str]:
     return new
 
 
+def _mute_if_live(page) -> bool:
+    """In-meeting media check (post-join): the menu dump shows 'Mute mic' /
+    'Turn camera off' ONLY when the device is currently live — click those and
+    report what was muted. Returns True if anything was turned off."""
+    muted = False
+    try:
+        for label in ("Mute mic", "Mute microphone", "Turn camera off"):
+            if page.get_by_text(label, exact=True).count() > 0:
+                # the control lives in the meeting bar; the text above was from
+                # the context menu — use the bar buttons directly
+                pass
+    except Exception:  # noqa: BLE001
+        pass
+    # Meeting-bar buttons: the mic/camera toggles expose their state in
+    # aria-labels ("Mute mic" means currently ON).
+    for aria in ("Mute mic", "Mute microphone", "Turn camera off", "Turn off camera"):
+        with contextlib.suppress(Exception):
+            btn = page.get_by_role("button", name=aria, exact=False).first
+            if btn.count() > 0 and btn.is_visible():
+                btn.click(timeout=2000)
+                muted = True
+                logger.info("media_control_off", control=aria)
+    return muted
+
+
 def _open_chat_panel(page) -> None:
     """Open the meeting Chat panel (best-effort) — in the light-meetings UI
     the chat stays collapsed until clicked, and an unrendered pane hides
@@ -305,12 +330,13 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
         joined = False
         joined_page = page
         name_filled_pages: set[int] = set()
+        joined_with_media_on = False
         join_deadline = time.time() + 90
         while time.time() < join_deadline and joined_page is page and not joined:
             for candidate in context.pages:
                 if "/dl/launcher" in candidate.url:
                     continue  # the chooser itself — nothing to join here
-                # mic/camera off whenever the toggles are present
+                # mic/camera OFF before joining (owner: listener never broadcasts)
                 for toggle_label in ("camera", "mic", "Caméra", "Mikrofon"):
                     with contextlib.suppress(Exception):
                         candidate.get_by_label(toggle_label, exact=False).first.click(
@@ -365,6 +391,13 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
         _open_chat_panel(page)      # form links land in the meeting chat
         _try_enable_captions(page)
 
+        # In-meeting safety: the pre-join toggles sometimes miss (config, race)
+        # — if media is still ON after joining, mute mic + turn camera off NOW.
+        page.wait_for_timeout(2500)  # let the meeting bar render
+        joined_with_media_on = _mute_if_live(page)
+        if joined_with_media_on:
+            logger.info("media_muted_after_join")
+
         transcript_file = _TRANSCRIPT_DIR / (
             "kyc_" + datetime.now().strftime("%Y%m%d_%H%M") + ".txt")
         transcript_file.parent.mkdir(parents=True, exist_ok=True)
@@ -385,10 +418,16 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
                         form_link = link
                         _relay_form_link(link)
                 if relayed:
-                    # form is up: linger 2 minutes so final notes/captions settle,
-                    # then leave (DEC-008 amendment flow).
-                    logger.info("form_found_leaving_soon")
-                    time.sleep(120)
+                    # form is up: stay 2 more minutes (final announcements and
+                    # the last captions land here), then leave automatically
+                    # (DEC-008 amendment flow — owner asked for this explicitly).
+                    leave_at = time.time() + 120
+                    logger.info("form_found_leaving_in_2_minutes")
+                    while time.time() < leave_at:
+                        for segment in _extract_captions(page, seen_captions):
+                            transcript_handle.write(segment + "\n")
+                            transcript_handle.flush()
+                        time.sleep(5)
                     break
                 time.sleep(5)
         finally:
