@@ -171,37 +171,33 @@ def _dump_controls(page, tag: str) -> list[str]:
 
 
 def _try_enable_captions(page) -> bool:
-    """Turn on live captions. Two strategies, diagnostics in between:
-    1. direct CC/captions control anywhere on the page (aria-label or text);
-    2. open More ('…') menus and look inside them.
-    All visible controls are dumped first so failures are debuggable."""
-    controls = _dump_controls(page, "joined")
-    # strategy 1: a direct captions control on the page
-    for label in ("Turn on live captions", "Turn on captions", "Live captions",
-                  "Captions", "CC"):
+    """Turn on live captions. The LPU tenant's meeting bar (from the control
+    dumps) exposes a 'More' button whose flyout contains a 'Captions' item —
+    click it with text-scoping (role-based lookups miss it: it renders as a
+    menuitem/div, not a button)."""
+    # strategy 1: direct captions control on the page (any role)
+    for label in ("Turn on live captions", "Turn on captions",
+                  "Live captions", "Captions"):
         with contextlib.suppress(Exception):
-            btn = page.get_by_role("button", name=label, exact=False).first
-            btn.click(timeout=1500)
+            page.get_by_text(label, exact=False).first.click(timeout=1500)
             logger.info("captions_enabled", via="direct", label=label)
             page.wait_for_timeout(1500)
             return True
-    # strategy 2: open every 'More'-ish menu and search inside
-    for more_label in ("More options", "More", "More actions"):
-        with contextlib.suppress(Exception):
-            page.get_by_role("button", name=more_label, exact=False).first.click(
-                timeout=2000)
-            page.wait_for_timeout(1000)
-            _dump_controls(page, "menu")
-            for label in ("Turn on live captions", "Turn on captions",
-                          "Live captions", "Captions"):
-                with contextlib.suppress(Exception):
-                    page.get_by_text(label, exact=False).first.click(timeout=2000)
-                    logger.info("captions_enabled", via="menu", label=label)
-                    page.wait_for_timeout(1500)
-                    return True
+    # strategy 2: open the 'More' flyout and click the Captions item inside it
+    with contextlib.suppress(Exception):
+        page.get_by_role("button", name="More", exact=False).first.click(
+            timeout=2500)
+        page.wait_for_timeout(1200)  # flyout animation
+        _dump_controls(page, "menu")
+        for label in ("Captions", "Turn on live captions", "Live captions"):
             with contextlib.suppress(Exception):
-                page.keyboard.press("Escape")
-    logger.warning("captions_enable_failed", visible_controls=len(controls))
+                page.get_by_text(label, exact=False).first.click(timeout=2500)
+                logger.info("captions_enabled", via="more-flyout", label=label)
+                page.wait_for_timeout(1500)
+                return True
+        with contextlib.suppress(Exception):
+            page.keyboard.press("Escape")
+    logger.warning("captions_enable_failed")
     return False
 
 
