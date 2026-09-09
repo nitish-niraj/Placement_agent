@@ -323,10 +323,18 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
         # differs by link type: work links go straight to toggles+Join;
         # personal links (teams.live) use the anonymous guest flow, where a
         # NAME field appears first and "Join now" enables only once filled.
+        #
+        # Signing in on the pre-join screen (owner requirement: the listener
+        # joins AS the authenticated user, never "(Unverified)"): the guest
+        # flow's 'Sign in' link switches to the Microsoft login, where the
+        # saved session auto-authenticates — after which the pre-join shows
+        # the real account instead of the name field. The join loop keeps
+        # polling until either path completes.
         joined = False
         joined_page = page
         name_filled_pages: set[int] = set()
         joined_with_media_on = False
+        signed_in_on_prejoin = False
         join_deadline = time.time() + 90
         while time.time() < join_deadline and joined_page is page and not joined:
             for candidate in context.pages:
@@ -337,7 +345,8 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
                     with contextlib.suppress(Exception):
                         candidate.get_by_label(toggle_label, exact=False).first.click(
                             timeout=800)
-                # guest name entry (personal links)
+                # Guest flow: fill the name, then prefer SIGNING IN over
+                # joining anonymously (the saved session makes this one click).
                 if id(candidate) not in name_filled_pages:
                     for name_sel in ("input[placeholder*='name' i]",
                                      "input[aria-label*='name' i]",
@@ -349,9 +358,27 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
                                 name_filled_pages.add(id(candidate))
                                 logger.info("guest_name_filled",
                                             page=candidate.url[:60])
+                                # look for the sign-in link next to the name
+                                for sign_label in ("Sign in", "Sign in to join",
+                                                   "Anmelden"):
+                                    with contextlib.suppress(Exception):
+                                        sign = candidate.get_by_text(
+                                            sign_label, exact=False).first
+                                        if sign.is_visible(timeout=800):
+                                            sign.click(timeout=2000)
+                                            signed_in_on_prejoin = True
+                                            logger.info(
+                                                "prejoin_signin_clicked",
+                                                label=sign_label)
+                                            break
                                 break
                         except Exception:  # noqa: BLE001
                             continue
+                # If we clicked sign-in, this page may navigate to the login
+                # and back — give it time and skip joining until it returns.
+                if signed_in_on_prejoin:
+                    time.sleep(2)
+                    continue
                 # Join button (enabled once a name is set / no name required)
                 for label in ("Join now", "Jetzt beitreten", "Rejoindre"):
                     try:
