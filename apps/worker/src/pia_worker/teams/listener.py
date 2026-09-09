@@ -347,6 +347,11 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
                             timeout=800)
                 # Guest flow: fill the name, then prefer SIGNING IN over
                 # joining anonymously (the saved session makes this one click).
+                # NOTE: the pre-join page KEEPS its own name field after the
+                # sign-in click (it authenticates in the background) — so the
+                # join loop must continue polling THIS page until "Join now"
+                # completes the authenticated join. Only fill the name once;
+                # re-clicking Sign in is a no-op once authenticated.
                 if id(candidate) not in name_filled_pages:
                     for name_sel in ("input[placeholder*='name' i]",
                                      "input[aria-label*='name' i]",
@@ -374,11 +379,11 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
                                 break
                         except Exception:  # noqa: BLE001
                             continue
-                # If we clicked sign-in, this page may navigate to the login
-                # and back — give it time and skip joining until it returns.
+                # After the sign-in click the pre-join reloads with the
+                # authenticated identity — wait briefly, then let the normal
+                # "Join now" path complete the authenticated join.
                 if signed_in_on_prejoin:
-                    time.sleep(2)
-                    continue
+                    time.sleep(3)
                 # Join button (enabled once a name is set / no name required)
                 for label in ("Join now", "Jetzt beitreten", "Rejoindre"):
                     try:
