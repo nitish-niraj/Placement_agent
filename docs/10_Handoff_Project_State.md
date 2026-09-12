@@ -51,8 +51,9 @@ create a personal test meeting, `set -a; . ./infrastructure/.env; set +a`, then
 `.venv/Scripts/python -m pia_worker.teams.listener "<url>" --minutes 4` and watch:
 participant-list identity (verified account, not "(Unverified)"), mic/cam icons
 off at join, captions bar, then paste a forms link in chat → expect Telegram relay
-within ~10 s. If the join still fails, read the new `join_failed_*` +
-`controls_prejoin_*` dumps in `transcripts/`.
+within ~10 s. If the join still fails, read the new `join_failed_*` dump — its
+body text carries the pre-join control labels (that's how "Mic on" /
+"With camera on and…" were first identified on 2026-09-09).
 
 ## 5. Commands & locations
 
