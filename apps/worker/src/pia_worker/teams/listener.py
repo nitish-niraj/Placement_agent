@@ -160,29 +160,186 @@ def _media_button_should_click(btn) -> bool:  # noqa: ANN001 — playwright hand
     return False
 
 
-def _turn_media_off_prejoin(pg, tries: dict[int, int]) -> None:  # noqa: ANN001
-    """Pre-join camera/mic: click ONLY the devices showing live state, once
-    per page. The old loop clicked get_by_label("camera") every 2 s — a blind
-    re-toggle that switched an already-OFF device back ON (root cause of the
-    joined-with-camera-on screenshots)."""
-    if tries.get(id(pg), 0) >= 3:
-        return
-    tries[id(pg)] = tries.get(id(pg), 0) + 1
-    found = False
+def _prejoin_state(pg) -> str:  # noqa: ANN001 — playwright sync Page
+    """One-line DOM truth for a pre-join page. Body-text dumps mislead (they
+    include hidden nodes); this reports only what the join loop acts on.
+    Anchored on Teams' STABLE data-tids (live DOM probe 2026-09-12:
+    prejoin-display-name-input / prejoin-join-button / auth-sign-in-link /
+    calling-lobby-screen), legacy selectors as fallback."""
+    parts: list[str] = [f"url={pg.url[:70]}"]
+    with contextlib.suppress(Exception):
+        box = pg.locator("[data-tid='prejoin-display-name-input'],"
+                         " input[placeholder*='name' i]").first
+        if box.count() > 0 and box.is_visible():
+            parts.append(f"name={box.input_value()[:20]!r}")
+        else:
+            parts.append("name=none")
+    with contextlib.suppress(Exception):
+        jn = pg.locator("[data-tid='prejoin-join-button']").first
+        if jn.count() == 0:
+            jn = pg.get_by_role("button", name="Join now",
+                                exact=False).first
+        vis = jn.count() > 0 and jn.is_visible()
+        parts.append(
+            f"joinnow={'on' if vis and jn.is_enabled(timeout=400) else 'off'}")
+    with contextlib.suppress(Exception):
+        si = pg.locator("[data-tid='auth-sign-in-link']").first
+        parts.append(
+            f"signin={'y' if si.count() > 0 and si.is_visible() else 'n'}")
+    with contextlib.suppress(Exception):
+        pc = pg.get_by_text("Privacy and cookies", exact=False).first
+        if pc.count() > 0 and pc.is_visible():
+            parts.append("consent=y")
+    with contextlib.suppress(Exception):
+        if pg.locator("[data-tid='calling-lobby-screen']").count() > 0:
+            parts.append("lobby=y")
+    with contextlib.suppress(Exception):
+        lf = sum(1 for fr in pg.frames if _is_login_url(fr.url))
+        if lf:
+            parts.append(f"login_frames={lf}")
+    return " ".join(parts)
+
+
+def _prejoin_status(pg) -> str:  # noqa: ANN001
+    """Normalized visible text of the light-meetings pre-join screen. Carries
+    the device-state phrases the toggles flip ('With camera on/off', 'Mic
+    on/off') — the only state signal, since the toggles themselves are
+    unlabeled. Empty for other pages."""
+    with contextlib.suppress(Exception):
+        t = pg.text_content("[data-tid='calling-prejoin-screen']") or ""
+        return " ".join(t.split()).lower()
+    return ""
+
+
+def _click_signin(pg) -> bool:  # noqa: ANN001
+    """Click the guest pre-join's Sign-in control: data-tid first
+    ('auth-sign-in-link', proven live), then role-/text-EXACT fallbacks.
+    NOT get_by_text(exact=False) — its container matches center-click the
+    wrong element (the bug behind every silent stall since 2026-09-09)."""
+    with contextlib.suppress(Exception):
+        link = pg.locator("[data-tid='auth-sign-in-link']").first
+        if link.count() > 0 and link.is_visible():
+            link.click(timeout=2500)
+            logger.info("prejoin_signin_clicked", via="tid")
+            return True
+    for kind in ("link", "button"):
+        with contextlib.suppress(Exception):
+            sign = pg.get_by_role(kind, name="Sign in", exact=True).first
+            if sign.count() > 0 and sign.is_visible(timeout=600):
+                sign.click(timeout=2500)
+                logger.info("prejoin_signin_clicked", via=kind)
+                return True
+    with contextlib.suppress(Exception):
+        sign = pg.get_by_text("Sign in", exact=True).first
+        if sign.count() > 0 and sign.is_visible(timeout=600):
+            sign.click(timeout=2500)
+            logger.info("prejoin_signin_clicked", via="text-exact")
+            return True
+    return False
+
+
+def _dismiss_consent(pg, steps: dict[int, int]) -> str:  # noqa: ANN001
+    """The pre-join 'Sign in' click first surfaces a Microsoft 'Privacy and
+    cookies' NOTICE FLYOUT that overlays the pre-join and silently swallows
+    every later click — including Join now's. Its buttons are only Close +
+    'Next' (informational carousel) + a privacy-statement link — probe 4
+    proof, 2026-09-12 — so the play is: accept if an accept button ever
+    appears, step Next ONCE, otherwise CLOSE it (a stuck-open flyout blocked
+    every join on 2026-09-09/12; closing is what unblocked run 5's join).
+
+    Matching is by EQUAL textContent of real <button> elements — the flyout
+    buttons carry NO role/aria attrs, and substring matching is dangerous:
+    has-text('OK') matches 'Privacy and cookies' and pops the statement."""
+    try:
+        head = pg.get_by_text("Privacy and cookies", exact=False).first
+        if head.count() == 0 or not head.is_visible():
+            return ""
+    except Exception:  # noqa: BLE001 — flyout gone / DOM shifted
+        return ""
+    accept_words = {"accept all", "accept", "allow all", "i agree",
+                    "confirm choices", "confirm my choices", "got it",
+                    "yes, accept all"}
+    accept_btn = next_btn = close_btn = None
     buttons: list = []
     with contextlib.suppress(Exception):
-        buttons = pg.query_selector_all("button[aria-label]")
+        buttons = pg.query_selector_all("button")
     for btn in buttons:
         with contextlib.suppress(Exception):
-            label = (btn.get_attribute("aria-label") or "").strip()
-            if not _MEDIA_RE.search(label):
+            if not btn.is_visible():
                 continue
-            found = True
-            if btn.is_visible() and _media_button_should_click(btn):
-                btn.click(timeout=2000)
-                logger.info("prejoin_media_off", control=label[:40])
-    if found:
-        tries[id(pg)] = 99  # decisive pass done — never re-toggle this page
+            txt = (btn.text_content() or "").strip().lower()
+            if txt in accept_words and accept_btn is None:
+                accept_btn = btn
+            elif txt == "next" and next_btn is None:
+                next_btn = btn
+            elif (txt == "close"
+                  or "close" in (btn.get_attribute("aria-label") or "")
+                  .lower()) and close_btn is None:
+                close_btn = btn
+    if accept_btn is not None:
+        with contextlib.suppress(Exception):
+            accept_btn.click(timeout=2000)
+        logger.info("consent_accepted")
+        return "accepted"
+    if next_btn is not None and steps.get(id(pg), 0) < 1:
+        steps[id(pg)] = 1
+        with contextlib.suppress(Exception):
+            next_btn.click(timeout=2000)
+        logger.info("consent_stepped")
+        return "stepped"
+    if close_btn is not None:
+        with contextlib.suppress(Exception):
+            close_btn.click(timeout=2000)
+        logger.info("consent_flyout_closed")
+        return "closed"
+    with contextlib.suppress(Exception):
+        pg.keyboard.press("Escape")
+    return "closed"
+
+
+def _turn_media_off_prejoin(pg, tries: dict[int, int]) -> None:  # noqa: ANN001
+    """Light-meetings pre-join mic/camera toggles are UNLABELED icon buttons
+    (aria-label/text/data-tid all null — live probe 2026-09-12). Target them
+    by stable data-tid neighbours and VERIFY the screen state text flipped
+    ('With camera on'->'With camera off', 'Mic on'->'Mic off'); a click that
+    does not produce the expected flip is REVERTED, so an errant click can
+    never leave a device ON."""
+    if tries.get(id(pg), 0) >= 4:
+        return
+    status = _prejoin_status(pg)
+    if not status:
+        return
+    tries[id(pg)] = tries.get(id(pg), 0) + 1
+    pending = 0
+    for dev, sel, on_w, off_w in (
+        ("camera", "button:has(+ [data-tid='video-flyout-open-button'])",
+         "with camera on", "with camera off"),
+        ("mic",
+         "xpath=//*[@data-tid='selected-microphone-display']"
+         "/preceding::button[1]", "mic on", "mic off"),
+    ):
+        if off_w in status:
+            continue  # confirmed off
+        if on_w not in status:
+            pending += 1
+            continue  # no state text yet — retry next cycle
+        pending += 1
+        with contextlib.suppress(Exception):
+            btn = pg.locator(sel).first
+            if btn.count() == 0:
+                logger.warning("prejoin_media_control_missing", device=dev)
+                continue
+            btn.click(timeout=2500)
+            pg.wait_for_timeout(1200)
+            after = _prejoin_status(pg)
+            if off_w in after or on_w not in after:
+                logger.info("prejoin_media_off", device=dev)
+            else:  # wrong element — undo, never join with it flipped ON
+                logger.warning("prejoin_media_click_reverted", device=dev)
+                with contextlib.suppress(Exception):
+                    btn.click(timeout=2500)
+    if pending == 0:
+        tries[id(pg)] = 99  # both devices confirmed off
 
 
 def _mute_if_live(page) -> bool:
@@ -441,86 +598,164 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
         joined_page = page
         name_filled_pages: set[int] = set()
         media_off_tries: dict[int, int] = {}
+        consent_steps: dict[int, int] = {}
+        page_states: dict[int, str] = {}
+        signin_attempts = 0
+        signin_last_click = 0.0
         signin_pending_until = 0.0
-        join_deadline = time.time() + 150  # sign-in adds a hop; poll longer
+        join_deadline = time.time() + 180  # consent + login hops need patience
         while time.time() < join_deadline and not joined:
-            # Microsoft login surfaces first — popup OR same-tab navigation.
+            # Microsoft login surfaces first — popup, same-tab navigation, or
+            # an embedded login IFRAME (light-meetings host guests' sign-in
+            # in one; the page URL never leaves teams.live.com).
+            login_surface = False
             for login_pg in list(context.pages):
                 if _is_login_url(login_pg.url):
+                    login_surface = True
                     _drive_login_page(login_pg)
+                    continue
+                with contextlib.suppress(Exception):
+                    for fr in login_pg.frames:
+                        if _is_login_url(fr.url):
+                            login_surface = True
+                            _drive_login_page(fr)
             for candidate in context.pages:
                 if ("/dl/launcher" in candidate.url
                         or _is_login_url(candidate.url)):
                     continue  # chooser / login surface — nothing to join here
+                # DOM truth every state change — the silent 150 s stalls of
+                # the 2026-09-12 runs were undiagnosable without it.
+                state = _prejoin_state(candidate)
+                if page_states.get(id(candidate)) != state:
+                    page_states[id(candidate)] = state
+                    logger.info("prejoin_state", state=state)
+                # Consent flyout blocks ALL clicks underneath it — clear it
+                # first, every cycle (accept preferred; see helper).
+                consent = _dismiss_consent(candidate, consent_steps)
                 # mic/camera OFF before joining (owner: the listener never
-                # broadcasts) — one decisive state-checked pass per page.
+                # broadcasts) — tid-anchored, text-verified, self-reverting.
                 _turn_media_off_prejoin(candidate, media_off_tries)
-                # Guest flow: fill the name ONCE, then upgrade to the verified
-                # identity via 'Sign in'. Re-filling is suppressed for 60 s
-                # after the click — the authenticated pre-join legitimately has
-                # no name field, and a refill would restart the guest flow.
-                if (time.time() >= signin_pending_until
-                        and id(candidate) not in name_filled_pages):
-                    for name_sel in ("input[placeholder*='name' i]",
+                guest_screen = "signin=y" in state
+                # The hop stalled on a consent screen (accepted just now) or
+                # the click was a no-op (probe v2: on anon light meetings
+                # 'Sign in' can be inert) — retry the link up to 3x,
+                # extending the window; the guest path takes over when it
+                # expires.
+                retry_signin = (id(candidate) in name_filled_pages
+                                and guest_screen
+                                and time.time() < signin_pending_until
+                                and not login_surface
+                                and signin_attempts < 4
+                                and (consent == "accepted"
+                                     or time.time() - signin_last_click > 15))
+                # Guest flow: fill the name ONCE (tid anchor), then attempt
+                # the authenticated upgrade via the Sign-in link.
+                if id(candidate) not in name_filled_pages:
+                    for name_sel in ("[data-tid='prejoin-display-name-input']",
+                                     "input[placeholder*='name' i]",
                                      "input[aria-label*='name' i]",
                                      "input[type='text']"):
                         try:
                             box = candidate.locator(name_sel).first
-                            if box.is_visible(timeout=500):
+                            if box.count() > 0 and box.is_visible(timeout=500):
                                 box.fill("Nitish Kumar")
                                 name_filled_pages.add(id(candidate))
                                 logger.info("guest_name_filled",
                                             page=candidate.url[:60])
-                                for sign_label in ("Sign in", "Sign in to join",
-                                                   "Anmelden"):
-                                    with contextlib.suppress(Exception):
-                                        sign = candidate.get_by_text(
-                                            sign_label, exact=False).first
-                                        if sign.is_visible(timeout=800):
-                                            sign.click(timeout=2000)
-                                            signin_pending_until = (
-                                                time.time() + 60)
-                                            logger.info(
-                                                "prejoin_signin_clicked",
-                                                label=sign_label)
-                                            break
+                                if _click_signin(candidate):
+                                    signin_attempts = 1
+                                    signin_last_click = time.time()
+                                    signin_pending_until = time.time() + 90
                                 break
                         except Exception:  # noqa: BLE001
                             continue
-                # Join button — guest path: enabled once the name is set;
-                # authenticated path: no name field was ever required.
-                for label in ("Join now", "Jetzt beitreten", "Rejoindre"):
-                    try:
-                        btn = candidate.get_by_role(
-                            "button", name=label, exact=False).first
-                        if btn.is_enabled(timeout=800):
-                            btn.click(timeout=3000)
-                            joined = True
-                            joined_page = candidate
+                elif retry_signin and _click_signin(candidate):
+                    signin_attempts += 1
+                    signin_last_click = time.time()
+                    signin_pending_until = max(
+                        signin_pending_until, time.time() + 30)
+                # Join decision. While an auth hop is pending on a GUEST
+                # screen, HOLD — clicking Join there is what joined run 4 as
+                # "(Unverified)". Join when the screen became authenticated
+                # (no name field, no Sign-in link), when there was no
+                # Sign-in control at all, or when the window expired.
+                if login_surface:
+                    continue
+                hold_guest = (time.time() < signin_pending_until
+                              and guest_screen)
+                if not hold_guest:
+                    for label in ("Join now", "Jetzt beitreten",
+                                  "Rejoindre"):
+                        try:
+                            btn = candidate.locator(
+                                "[data-tid='prejoin-join-button']").first
+                            if btn.count() == 0:
+                                btn = candidate.get_by_role(
+                                    "button", name=label,
+                                    exact=False).first
+                            if btn.is_enabled(timeout=800):
+                                btn.click(timeout=3000)
+                                joined = True
+                                joined_page = candidate
+                                logger.info(
+                                    "joined_as",
+                                    identity="authenticated"
+                                    if "signin=n" in state and "name=none"
+                                    in state else "guest")
+                                break
+                        except Exception as exc:  # noqa: BLE001
+                            # An ENABLED button whose click times out =
+                            # something overlays it (run 3: consent flyout).
+                            logger.info("join_now_click_failed",
+                                        error=str(exc).splitlines()[0][:140])
                             break
-                    except Exception:  # noqa: BLE001
-                        continue
                 if joined:
                     break
             if not joined:
                 time.sleep(2)
         page = joined_page
         if not joined:
-            # Diagnostics: screenshot + visible text so join failures are
-            # always explainable (ended meeting, lobby, permission wall…).
+            # Diagnostics: DOM truth FIRST, screenshot LAST — in the 18:43 run
+            # a throwing screenshot call inside the shared suppress block
+            # killed the whole dump. Each piece now fails independently.
             diag = _TRANSCRIPT_DIR / (
                 "join_failed_" + datetime.now().strftime("%Y%m%d_%H%M%S"))
             diag.parent.mkdir(parents=True, exist_ok=True)
+            lines = [f"pages: {len(context.pages)}"]
             with contextlib.suppress(Exception):
-                page.screenshot(path=str(diag) + ".png")
-                body = (page.text_content("body") or "").replace("\n", " ")[:300]
+                lines.append(f"url: {page.url}")
+                lines.append(
+                    f"body: {(page.text_content('body') or '')[:300]}")
+            for pg in context.pages:
+                with contextlib.suppress(Exception):
+                    lines.append(f"state: {_prejoin_state(pg)}")
+                    lines.append("  visible: " + " | ".join(
+                        _dump_controls(pg, "failed")[:40]))
+            with contextlib.suppress(Exception):
                 (diag.with_suffix(".txt")).write_text(
-                    f"url: {page.url}\ntitle: {page.title()}\nbody: {body}",
-                    encoding="utf-8")
+                    "\n".join(lines), encoding="utf-8")
+            with contextlib.suppress(Exception):
+                page.screenshot(path=str(diag) + ".png", timeout=15000)
             logger.warning("listener_join_button_not_found", diag=str(diag))
             browser.close()
             return "join_failed"
         logger.info("listener_joined")
+        # A guest join can stall in the LOBBY (calling-lobby-screen — proven
+        # live 2026-09-12) until the host admits. Surface it and wait, so a
+        # silent 'joined' never reads as a working listener.
+        with contextlib.suppress(Exception):
+            if page.locator("[data-tid='calling-lobby-screen']").count() > 0:
+                logger.warning("listener_in_lobby",
+                               hint="waiting for host to admit")
+                lobby_end = time.time() + 120
+                while time.time() < lobby_end and page.locator(
+                        "[data-tid='calling-lobby-screen']").count() > 0:
+                    page.wait_for_timeout(3000)
+                logger.info("lobby_wait_over",
+                            still_waiting=page.locator(
+                                "[data-tid='calling-lobby-screen']").count()
+                            > 0)
+        _dump_controls(page, "joined")  # evidence for captions/bar selectors
         _open_chat_panel(page)      # form links land in the meeting chat
         _try_enable_captions(page)
 

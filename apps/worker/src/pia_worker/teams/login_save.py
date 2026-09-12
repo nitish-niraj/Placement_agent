@@ -2,16 +2,23 @@
 personal listener — owner's own credentials).
 
 Run locally, headed (a real browser window opens):
-    .venv/Scripts/python -m pia_worker.teams.login_save
+    .venv/Scripts/python -m pia_worker.teams.login_save [meeting-url]
 
-Sign in with YOUR university Microsoft account (complete MFA, click Yes on
-"Stay signed in"). The script auto-detects when Teams has loaded — and if it
-doesn't, pressing Ctrl+C after you are in saves the session anyway. The
-session goes to infrastructure/teams_session.json (gitignored, SEC-001); the
-password is never stored anywhere. Re-run when the session expires.
+Phase 1 — sign in with YOUR university Microsoft account on the Teams app
+(complete MFA, click Yes on "Stay signed in").
+Phase 2 — if a MEETING URL is given, the same window then opens that meeting
+so the CONSUMER sign-in hop gets trained too: click 'Sign in' on the pre-join,
+complete the login, ACCEPT the 'Privacy and cookies' notice (live probes
+2026-09-12: the listener can never get past that notice — the consent cookie
+must be baked into the session here, once, by a human), and leave the
+authenticated pre-join on screen. Auto-detected, then saved; Ctrl+C after
+you're in saves anyway. Session: infrastructure/teams_session.json
+(gitignored, SEC-001) — the password is never stored. Re-run whenever the
+listener joins as guest/"Unverified" instead of your account.
 """
 
 import contextlib
+import sys
 import time
 from pathlib import Path
 
@@ -35,10 +42,22 @@ def _on_login_page(url: str) -> bool:
 
 
 def main() -> None:
+    """login_save [meeting-url] — phase 1 org app login (always); phase 2
+    trains the consumer sign-in hop + privacy-consent cookie on the given
+    meeting URL (skipped when no URL is passed)."""
+    meeting_url = sys.argv[1] if len(sys.argv) > 1 else ""
     _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False)
-        context = browser.new_context(viewport={"width": 1400, "height": 900})
+        context = browser.new_context(
+            viewport={"width": 1400, "height": 900},
+            # Same realistic Edge UA the listener needs — Teams serves a
+            # degraded, never-loading shell to the default automation UA.
+            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0"),
+            locale="en-IN",
+        )
         page = context.new_page()
         page.goto("https://teams.microsoft.com/")
         _say("Log in with your university account (complete MFA, click Yes on "
@@ -109,6 +128,51 @@ def main() -> None:
             with contextlib.suppress(Exception):
                 browser.close()
             return
+
+        # --- Phase 2: train the consumer meeting hop + consent cookie ------
+        if meeting_url:
+            from pia_worker.teams.listener import (  # noqa: PLC0415
+                _direct_meeting_url,
+                _resolve_link,
+            )
+            direct = _direct_meeting_url(_resolve_link(meeting_url))
+            if not is_teams_url(direct):
+                _say(f"Not a Teams URL after resolving ({direct[:60]}) — "
+                     "skipping phase 2.")
+            else:
+                try:
+                    page.goto(direct, timeout=60_000)
+                except Exception as exc:  # noqa: BLE001
+                    _say(f"  (meeting page hiccup: {str(exc)[:80]})")
+                _say("Phase 2: on the meeting PRE-JOIN screen, click "
+                     "'Sign in' → complete the Microsoft")
+                _say("  login → ACCEPT the 'Privacy and cookies' notice "
+                     "(Next → Accept) — this is")
+                _say("  the consent cookie the listener cannot get past — → "
+                     "Yes on 'Stay signed in'.")
+                _say("  Leave the window on the pre-join that shows YOUR "
+                     "ACCOUNT (no name box).")
+                end2 = time.time() + 300  # 5 minutes for the human steps
+                try:
+                    while time.time() < end2:
+                        signin = name_box = join = False
+                        with contextlib.suppress(Exception):
+                            signin = page.locator(
+                                "[data-tid='auth-sign-in-link']").is_visible()
+                            name_box = page.locator(
+                                "[data-tid='prejoin-display-name-input']"
+                            ).is_visible()
+                            join = page.locator(
+                                "[data-tid='prejoin-join-button']").is_visible()
+                        if join and not signin and not name_box:
+                            _say("Authenticated pre-join detected — saving.")
+                            break
+                        time.sleep(3)
+                except KeyboardInterrupt:
+                    _say("Interrupted — saving the session as-is.")
+                else:
+                    _say("Phase-2 window elapsed — saving anyway "
+                         "(cookies collected so far persist).")
 
         context.storage_state(path=str(_STATE_FILE))
         _say(f"Signed in — session saved: {_STATE_FILE} "
