@@ -696,6 +696,45 @@ def _try_enable_captions(page) -> bool:
     return False
 
 
+def _openrouter_summary(prompt: str) -> str:
+    """Second brain when NIM fails (owner decision 2026-09-12): OpenRouter
+    chat completion, plain text — deliberately simpler than the structured
+    primary path. Best-effort: raises ProviderError for the caller's final
+    raw-transcript fallback. NOTE: the free OpenRouter balance is small, so
+    the transcript cap here is tighter than the NIM prompt's."""
+    settings = get_settings()
+    if not settings.openrouter_api_key:
+        raise ProviderError("openrouter: OPENROUTER_API_KEY not configured")
+    try:
+        response = httpx.post(
+            f"{settings.openrouter_base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {settings.openrouter_api_key}",
+                     "HTTP-Referer": "https://github.com/nitish-niraj/Placement_agent",
+                     "X-Title": "PIA KYC summary fallback"},
+            json={
+                "model": settings.openrouter_model,
+                "max_tokens": 400,  # fits small balances; summary-sized
+                "messages": [
+                    {"role": "system", "content": (
+                        "Summarize placement KYC session transcripts for the "
+                        "student: company, role, package if mentioned, key "
+                        "points. Plain text bullets, only facts from the "
+                        "text, under 120 words.")},
+                    {"role": "user", "content": prompt},
+                ],
+            },
+            timeout=60,
+        )
+        response.raise_for_status()
+        content = (response.json()["choices"][0]["message"]["content"]
+                   or "").strip()
+    except Exception as exc:  # noqa: BLE001 — normalized into ProviderError
+        raise ProviderError(f"openrouter: {str(exc)[:180]}") from exc
+    if not content:
+        raise ProviderError("openrouter: empty completion")
+    return content
+
+
 def _summarize(transcript_text: str, form_link: str | None,
                presenters: tuple[str, ...] = ()) -> str:
     """LLM summary of the discussion from the captured captions; deterministic
@@ -732,6 +771,19 @@ def _summarize(transcript_text: str, form_link: str | None,
         return "\n".join(lines)
     except ProviderError as exc:
         logger.warning("summary_llm_unavailable", error=str(exc)[:120])
+        # Fallback #2 — OpenRouter (owner's chain: NIM -> OpenRouter -> raw).
+        or_prompt = ("TRANSCRIPT:\n" + transcript_text[:4000])
+        try:
+            text = _openrouter_summary(or_prompt)
+            logger.info("summary_openrouter_fallback_used")
+            if form_link:
+                text += f"\n📝 Feedback form: {form_link}"
+            return text + "\n🤖 via OpenRouter (primary NIM failed: " \
+                + str(exc)[:60] + ")"
+        except ProviderError as exc2:
+            logger.warning("summary_openrouter_unavailable",
+                           error=str(exc2)[:160])
+        # Fallback #3 — honest raw transcript (source-backed, never invented).
         head = transcript_text[:1500]
         tail = f"\n\n📝 Feedback form: {form_link}" if form_link else ""
         return (f"LLM unavailable — raw transcript (first {len(head)} chars):\n"
