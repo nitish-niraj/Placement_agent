@@ -46,23 +46,30 @@ class Settings(BaseSettings):
     # (registration number is THE key identifier). Same key as the API.
     pia_encryption_key: str = ""
 
-    # LLM: NVIDIA NIM via OpenAI-compatible adapter (DEC-006, bake-off verified)
+    # LLM: NVIDIA NIM via OpenAI-compatible adapter (DEC-006, DEC-010).
+    # Primary text model swapped 2026-09-13: mistral-nemotron timed out on
+    # live summary calls; nemotron-3-super-120b won the mini bake-off
+    # (schema-valid JSON in 4.3 s, free tier).
     nvidia_api_key: str = ""
     nvidia_base_url: str = "https://integrate.api.nvidia.com/v1"
-    llm_model: str = "mistralai/mistral-nemotron"
+    llm_model: str = "nvidia/nemotron-3-super-120b-a12b"
     llm_vision_model: str = "meta/llama-3.2-11b-vision-instruct"
     embedding_model: str = "nvidia/nemotron-3-embed-1b"  # 2048 dims = message_embeddings
     llm_timeout_seconds: int = 45
     ask_retrieve_k: int = 8  # P12 conversational search context size
 
-    # Summary fallback chain (owner decision 2026-09-12/13): NIM fails ->
-    # OpenRouter chat completion -> raw-transcript fallback. Key lives ONLY
-    # in infrastructure/.env (SEC-001). Default model is the free-tier
-    # inclusionai/ling-3.0-flash-vl (manual-tested 2026-09-13: valid JSON +
-    # plain text; reasoning model -> needs generous max_tokens).
+    # Summary fallback chain (owner decisions 2026-09-12/13, DEC-010):
+    # NIM structured -> OpenRouter -> Groq -> raw transcript. All keys live
+    # ONLY in infrastructure/.env (SEC-001). OpenRouter default is the
+    # free-tier reasoning model (needs token headroom; manual-tested
+    # 2026-09-13); Groq default is the free-tier gpt-oss-120b (1K req +
+    # 200K tokens/day free, tested 2026-09-13).
     openrouter_api_key: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_model: str = "inclusionai/ling-3.0-flash-vl:free"
+    groq_api_key: str = ""
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+    groq_model: str = "openai/gpt-oss-120b"
 
     # SEC-005 kill switch — same refusal rule as the API.
     action_automation_enabled: bool = False

@@ -165,7 +165,8 @@ class LLMProvider(Protocol):
     ) -> tuple[BaseModel, LLMUsage]: ...
 ```
 
-- Config: `LLM_PROVIDER` (`openai_compatible` for NVIDIA NIM hosted API at `https://integrate.api.nvidia.com/v1`; `anthropic` supported as an alternative), `LLM_MODEL` (text tasks), `LLM_VISION_MODEL` (vision tasks, FR-ELG-004 path), API key from secret store/env only — never in code (SEC-001).
+- Config: `LLM_PROVIDER` (`openai_compatible` for NVIDIA NIM hosted API at `https://integrate.api.nvidia.com/v1`; `anthropic` supported as an alternative), `LLM_MODEL` (text tasks — default `nvidia/nemotron-3-super-120b-a12b` since DEC-010), `LLM_VISION_MODEL` (vision tasks, FR-ELG-004 path), API key from secret store/env only — never in code (SEC-001).
+- **Summary fallback ladder (DEC-010):** the KYC meeting summary uses a 4-rung chain, each rung labelling its source in the delivered message — **NIM (structured) → OpenRouter (`OPENROUTER_*`) → Groq (`GROQ_*`) → raw transcript**. A rung raising `ProviderError` (timeout/402/429/invalid) fails over to the next; the raw transcript is always the final, source-backed answer so the pipeline can never fail silently. `tests/unit/test_listener_summary.py` locks the ladder order offline.
 - Every call: JSON/structured output constrained to a pydantic schema; on validation failure → 1 repair retry with the validation error appended; on second failure → task marked `INVALID` and the message proceeds on rule-based paths only (never crashes the pipeline).
 - **Null-when-unknown policy (FR-CLS-003, FR-EVT-005):** prompts instruct the model to emit `null` for any field without direct textual evidence; validators reject invented values (e.g., a date string not present in the source text fails extraction validation).
 - **State isolation (ADR-004):** LLM output is *input* to deterministic state-transition functions; no handler writes to authoritative tables directly from a model response.

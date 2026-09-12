@@ -738,6 +738,45 @@ def _openrouter_summary(prompt: str) -> str:
     return content
 
 
+def _groq_summary(prompt: str) -> str:
+    """Third brain when NIM and OpenRouter both fail (DEC-010): Groq's free
+    tier `openai/gpt-oss-120b` (1K requests / 200K tokens per day, tested
+    2026-09-13). Reasoning model — max_completion_tokens must leave headroom
+    or `content` returns null. Raises ProviderError for the final raw
+    fallback."""
+    settings = get_settings()
+    if not settings.groq_api_key:
+        raise ProviderError("groq: GROQ_API_KEY not configured")
+    try:
+        response = httpx.post(
+            f"{settings.groq_base_url.rstrip('/')}/chat/completions",
+            headers={"Authorization": f"Bearer {settings.groq_api_key}",
+                     "Content-Type": "application/json"},
+            json={
+                "model": settings.groq_model,
+                "max_completion_tokens": 1500,
+                "temperature": 0.1,
+                "messages": [
+                    {"role": "system", "content": (
+                        "Summarize placement KYC session transcripts for the "
+                        "student: company, role, package if mentioned, key "
+                        "points. Plain text bullets, only facts from the "
+                        "text, under 120 words.")},
+                    {"role": "user", "content": prompt},
+                ],
+            },
+            timeout=60,
+        )
+        response.raise_for_status()
+        content = (response.json()["choices"][0]["message"]["content"]
+                   or "").strip()
+    except Exception as exc:  # noqa: BLE001 — normalized into ProviderError
+        raise ProviderError(f"groq: {str(exc)[:180]}") from exc
+    if not content:
+        raise ProviderError("groq: empty completion")
+    return content
+
+
 def _summarize(transcript_text: str, form_link: str | None,
                presenters: tuple[str, ...] = ()) -> str:
     """LLM summary of the discussion from the captured captions; deterministic
@@ -774,7 +813,13 @@ def _summarize(transcript_text: str, form_link: str | None,
         return "\n".join(lines)
     except ProviderError as exc:
         logger.warning("summary_llm_unavailable", error=str(exc)[:120])
-        # Fallback #2 — OpenRouter (owner's chain: NIM -> OpenRouter -> raw).
+        # Fallback ladder (DEC-010, owner order 2026-09-13):
+        # NIM -> OpenRouter -> Groq -> raw transcript. Each rung tags itself
+        # in the message, so you always know which brain answered.
+        # NB: `exc`/`exc2` are deleted at the end of their except blocks in
+        # py3, so persist the reason strings in plain locals to reuse below.
+        nim_error = str(exc)
+        or_error = ""
         or_prompt = ("TRANSCRIPT:\n" + transcript_text[:4000])
         try:
             text = _openrouter_summary(or_prompt)
@@ -782,11 +827,22 @@ def _summarize(transcript_text: str, form_link: str | None,
             if form_link:
                 text += f"\n📝 Feedback form: {form_link}"
             return text + "\n🤖 via OpenRouter (primary NIM failed: " \
-                + str(exc)[:60] + ")"
+                + nim_error[:60] + ")"
         except ProviderError as exc2:
+            or_error = str(exc2)
             logger.warning("summary_openrouter_unavailable",
-                           error=str(exc2)[:160])
-        # Fallback #3 — honest raw transcript (source-backed, never invented).
+                           error=or_error[:160])
+        try:
+            text = _groq_summary(or_prompt)
+            logger.info("summary_groq_fallback_used")
+            if form_link:
+                text += f"\n📝 Feedback form: {form_link}"
+            return text + "\n🤖 via Groq (NIM + OpenRouter failed: " \
+                + or_error[:60] + ")"
+        except ProviderError as exc3:
+            logger.warning("summary_groq_unavailable",
+                           error=str(exc3)[:160])
+        # Final rung — honest raw transcript (source-backed, never invented).
         head = transcript_text[:1500]
         tail = f"\n\n📝 Feedback form: {form_link}" if form_link else ""
         return (f"LLM unavailable — raw transcript (first {len(head)} chars):\n"

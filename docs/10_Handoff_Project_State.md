@@ -19,8 +19,8 @@
 
 1. `login_save` (run on host, headed): programmatic Microsoft login → `infrastructure/teams_session.json` (550 KB, validated authenticated) ✅
 2. `listen(url)`: resolves tinyurl/shorteners → **decodes the launcher to the direct meeting URL** (avoids the `ms-teams:` protocol dialog) → warms the app shell at `https://teams.cloud.microsoft/` (15 s, **realistic Edge UA required** — default UA makes the SPA hang) → opens the meeting → guest name entry ("Nitish Kumar") → **JOINS** ✅ (several live tests)
-3. Post-join: opens chat, tries captions, watches the chat for Google-Forms links → **instant Telegram relay** (armed; fires only if a link is posted while the bot is inside — the earlier CAPP401 link was from a previous session so 0 relays was correct behavior), transcript file, 2-min linger after form, auto-Leave ✅
-4. After leaving: `MeetingSummary` via NIM (host runs need `.env` sourced for `NVIDIA_API_KEY`; NIM 500-flaky → honest raw-transcript fallback — **delivered to Telegram in tests**) ✅
+3. Post-join: opens chat, enables+verifies captions, watches chat for Google-Forms links → **instant Telegram relay + join-proof photo**, leaves ~30 s after the link (final rung; see §4 item 6) ✅
+4. After leaving: `MeetingSummary` via a **4-rung fallback ladder (DEC-010)** — NIM structured (`nvidia/nemotron-3-super-120b-a12b`) → OpenRouter (`inclusionai/ling-3.0-flash-vl:free`) → Groq (`openai/gpt-oss-120b`, 1K req/200K tok/day free) → honest raw transcript. Each rung tags its source; any timeout/402/429/invalid fails over. Ladder order locked by `tests/unit/test_listener_summary.py`. Host runs need `.env` sourced for all three keys ✅
 5. Captions: transcript capture **works when captions are ON** (real speech captured: "Hello this is Mike testing 1-2 three"); the AUTO-ENABLE is the open issue below.
 
 ## 3. THE open problem (exactly two sub-issues) — ✅ fixed 2026-09-12, see §4
@@ -71,4 +71,4 @@ set -a; . ./infrastructure/.env; set +a
 # gates
 .venv/Scripts/python -m ruff check . && .venv/Scripts/python -m mypy apps/api/src apps/worker/src packages/shared/src && .venv/Scripts/python -m pytest -q
 ```
-Files: `apps/worker/src/pia_worker/teams/{listener.py,login_save.py,__init__.py (is_teams_url)}`, tests `tests/unit/test_ask.py` etc., diagnostics in `transcripts/`, env keys `TEAMS_EMAIL/TEAMS_PASSWORD/EMBEDDING_MODEL/NOTIFY_*`. Docs: 00–09 + this handoff; thresholds: docs/07, docs/08.
+Files: `apps/worker/src/pia_worker/teams/{listener.py,login_save.py,__init__.py (is_teams_url)}`, tests `tests/unit/test_ask.py` etc., diagnostics in `transcripts/`, env keys `TEAMS_EMAIL/TEAMS_PASSWORD/EMBEDDING_MODEL/NOTIFY_*` and the DEC-010 summary providers `NVIDIA_API_KEY`, `OPENROUTER_API_KEY/_MODEL`, `GROQ_API_KEY/_MODEL` (all free tier, all gitignored via `infrastructure/.env`). Docs: 00–09 + this handoff; thresholds: docs/07, docs/08.

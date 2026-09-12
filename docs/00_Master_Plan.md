@@ -73,6 +73,11 @@ Where the two source docs conflict, the **Master Requirements doc wins**, except
 - **Rationale:** Leaner doc Phase 4 adds concrete, non-contradicting mechanisms; master requires the outcome (FR-DED-*, NFR-005) without prescribing these details.
 - **Consequence:** 02_TRD dedup section and 05_Backend_Schema (content_hash + image_phash columns) incorporate both.
 
+### DEC-010 — Summary fallback ladder + NIM primary model swap (2026-09-12/13)
+- **Decision:** The KYC meeting summary (and any best-effort LLM path) now runs a four-rung ladder, each rung tagging its source in the Telegram message: **NIM (structured, primary) → OpenRouter → Groq → honest raw transcript**. On the owner's explicit order, the sequence is NIM first, then OpenRouter, then Groq. All three providers are used on **free tiers**. The NIM primary text model is swapped from `mistralai/mistral-nemotron` to **`nvidia/nemotron-3-super-120b-a12b`** (schema-valid JSON in 4.3 s vs. the old model timing out at 90 s live); OpenRouter uses `inclusionai/ling-3.0-flash-vl:free`; Groq uses `openai/gpt-oss-120b` (1K req / 200K tokens/day free). Provider keys live only in `infrastructure/.env` (SEC-001); a provider 402/429/timeout fails over to the next rung automatically.
+- **Rationale:** DEC-006 already mandated a provider-agnostic, schema-validated, never-state-mutating LLM layer with a deterministic fallback; NIM's free tier is flaky (observed live: timeouts, and a summary that fell through to raw). Adding cheap, independent free providers raises the chance a *summarized* (not raw) result reaches Telegram without any paid dependency, per the owner's request.
+- **Consequence:** New settings `openrouter_*`/`groq_*` + `LLM_MODEL` default; `teams/listener.py` `_summarize` extended; `tests/unit/test_listener_summary.py` covers ladder order + final fallback offline; `02_TRD` §4.1 and env.example reflect the chain. No schema/DB change.
+
 ---
 
 ## 3. Architecture Summary
