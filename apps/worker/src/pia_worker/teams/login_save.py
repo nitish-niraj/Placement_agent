@@ -79,13 +79,26 @@ def main() -> None:
         # Teams domain with a "Sign in" button for anonymous visitors — so the
         # URL must hold for 20 continuous seconds AND no "Sign in" control may
         # be visible in the DOM. The authenticated app has neither.
-        deadline = time.time() + 600  # 10 minutes: take your time on MFA
+        deadline = time.time() + 900  # 15 minutes: take your time on MFA
         signed_in = False
         last_reported: str | None = None
         stable_since: float | None = None
         prompted = False
+        last_beat = time.time()
         try:
             while time.time() < deadline:
+                if time.time() - last_beat > 60:
+                    last_beat = time.time()
+                    _say(f"  (window still open — {int(deadline - time.time())}"
+                         "s left; complete the LPU login)")
+                # Microsoft sometimes completes in a DIFFERENT tab (login
+                # popup) than the page we started — track the live one.
+                for pg2 in context.pages:
+                    with contextlib.suppress(Exception):
+                        if is_teams_url(pg2.url) and not _on_login_page(
+                                pg2.url):
+                            page = pg2
+                            break
                 url = page.url
                 if url != last_reported:
                     _say(f"  current page: {url[:100]}")
