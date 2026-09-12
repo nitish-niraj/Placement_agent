@@ -25,7 +25,7 @@
 ## 3. THE open problem (exactly two sub-issues)
 
 **A. Authenticated join — "Sign in" on the pre-join screen isn't reliably driven.**
-Without it the participant shows as **"Nitish Kumar (Unverified)"** (guest identity) instead of the verified `[redacted-university-email]` account. Owner wants verified identity.
+Without it the participant shows as **"Nitish Kumar (Unverified)"** (guest identity) instead of the verified account (`TEAMS_EMAIL` in `.env`). Owner wants verified identity.
 Observed behavior (from ~8 experiments):
 - The pre-join has exactly **one** "Sign in" text control (a 52×17 px link near the bottom). Clicking it does NOT reliably produce a new popup (`context.expect_page` timed out at 20 s twice), and same-tab navigation either stalls 30 s+ at the same URL or — in ONE success — completed: the later join_failed diagnostic captured the page at `teams.microsoft.com/v2/` showing **the authenticated identity + "Join now"** (pre-join had become signed-in, join simply not clicked in time).
 - Conclusion: the sign-in sometimes opens a popup window (must register `context.on("page")` BEFORE clicking and drive email→password→"Stay signed in: Yes" inside it — creds now in `TEAMS_EMAIL`/`TEAMS_PASSWORD` in `.env`), and sometimes needs longer patience. Current code polls all pages but times out too early and re-fills the name field after the sign-in hop (the authenticated pre-join has NO name field — that's normal).

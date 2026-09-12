@@ -31,10 +31,9 @@ from pia_worker.teams import is_teams_url
 
 logger = structlog.get_logger()
 
-# Fallback credentials for the login popup (DEC-008 amendment: the listener
-# joins AS the owner). Set TEAMS_EMAIL / TEAMS_PASSWORD in infrastructure/.env.
-TEAMS_FALLBACK_EMAIL = "[redacted-university-email]"
-TEAMS_FALLBACK_PASSWORD = "[redacted-password-rotate-me]"
+# Login-popup credentials come ONLY from the environment (DEC-008 amendment:
+# the listener joins AS the owner). Set TEAMS_EMAIL / TEAMS_PASSWORD in
+# infrastructure/.env — never hardcode them here.
 
 _STATE_FILE = Path(__file__).resolve().parents[5] / "infrastructure" / "teams_session.json"
 _TRANSCRIPT_DIR = Path(__file__).resolve().parents[5] / "transcripts"
@@ -391,8 +390,7 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
                     with contextlib.suppress(Exception):
                         email_box = popup.locator("input[type=email]")
                         if email_box.count() > 0 and email_box.first.is_visible():
-                            email_box.first.fill(settings.teams_email or
-                                                 TEAMS_FALLBACK_EMAIL)
+                            email_box.first.fill(settings.teams_email)
                             popup.locator("input[type=submit], "
                                           "button[type=submit]").first.click(
                                               timeout=2000)
@@ -401,8 +399,7 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
                     with contextlib.suppress(Exception):
                         pw_box = popup.locator("input[type=password]")
                         if pw_box.count() > 0 and pw_box.first.is_visible():
-                            pw_box.first.fill(settings.teams_password or
-                                              TEAMS_FALLBACK_PASSWORD)
+                            pw_box.first.fill(settings.teams_password)
                             popup.locator("input[type=submit], "
                                           "button[type=submit]").first.click(
                                               timeout=2000)
