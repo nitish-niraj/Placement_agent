@@ -16,6 +16,7 @@ lightweight over heavy).
 """
 
 import contextlib
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -116,28 +117,90 @@ def _extract_captions(page, seen: set[str]) -> list[str]:
     return new
 
 
-def _mute_if_live(page) -> bool:
-    """In-meeting media check (post-join): the menu dump shows 'Mute mic' /
-    'Turn camera off' ONLY when the device is currently live — click those and
-    report what was muted. Returns True if anything was turned off."""
-    muted = False
-    try:
-        for label in ("Mute mic", "Mute microphone", "Turn camera off"):
-            if page.get_by_text(label, exact=True).count() > 0:
-                # the control lives in the meeting bar; the text above was from
-                # the context menu — use the bar buttons directly
-                pass
-    except Exception:  # noqa: BLE001
-        pass
-    # Meeting-bar buttons: the mic/camera toggles expose their state in
-    # aria-labels ("Mute mic" means currently ON).
-    for aria in ("Mute mic", "Mute microphone", "Turn camera off", "Turn off camera"):
+# Media-toggle state detection (pre-join + meeting bar). The Teams UI labels
+# these buttons by CURRENT state — from transcripts/controls_* dumps: "Mute
+# mic"/"Turn camera off" render only while the device is LIVE; off-state labels
+# are "Unmute mic"/"Turn camera on"/"Camera off". Substring name-matching is
+# unsafe ("Unmute mic" contains "mute mic"), hence anchored regexes + the
+# live-check winning over the dead-check ("Turn camera off" contains
+# "camera off" but means LIVE).
+_MEDIA_RE = re.compile(r"camera|video|\bmic\b|microphone", re.IGNORECASE)
+_LIVE_RE = re.compile(
+    r"turn (the )?(camera|video|mic|microphone) off|\bmute\b"
+    r"|\b(mic|camera|video) on\b|with (the )?(camera|mic|microphone) on",
+    re.IGNORECASE)
+_DEAD_RE = re.compile(
+    r"turn (the )?(camera|video|mic|microphone) on|unmute"
+    r"|\b(mic|microphone|camera|video)( is)? off\b", re.IGNORECASE)
+
+
+def _is_login_url(url: str) -> bool:
+    """Microsoft login surfaces (work accounts use microsoftonline, personal
+    accounts login.live.com) — popup or same-tab alike."""
+    return ("login.microsoftonline" in url or "login.live.com" in url
+            or "microsoftonline.com" in url or "account.live.com" in url)
+
+
+def _media_button_should_click(btn) -> bool:  # noqa: ANN001 — playwright handle
+    """True when this aria-labelled button toggles a currently-LIVE device."""
+    with contextlib.suppress(Exception):
+        aria = (btn.get_attribute("aria-label") or "").strip()
+        if not aria or not _MEDIA_RE.search(aria):
+            return False
+        if _LIVE_RE.search(aria):
+            return True
+        if _DEAD_RE.search(aria):
+            return False
+        pressed = (btn.get_attribute("aria-pressed") or "").lower()
+        if pressed in ("true", "false"):
+            return pressed == "true"
+        # No state signal at all: only a bare toggle label ("Camera",
+        # "Microphone", "Mic") justifies clicking on faith.
+        return bool(re.match(r"(camera|microphone|mic)\b", aria, re.IGNORECASE))
+    return False
+
+
+def _turn_media_off_prejoin(pg, tries: dict[int, int]) -> None:  # noqa: ANN001
+    """Pre-join camera/mic: click ONLY the devices showing live state, once
+    per page. The old loop clicked get_by_label("camera") every 2 s — a blind
+    re-toggle that switched an already-OFF device back ON (root cause of the
+    joined-with-camera-on screenshots)."""
+    if tries.get(id(pg), 0) >= 3:
+        return
+    tries[id(pg)] = tries.get(id(pg), 0) + 1
+    found = False
+    buttons: list = []
+    with contextlib.suppress(Exception):
+        buttons = pg.query_selector_all("button[aria-label]")
+    for btn in buttons:
         with contextlib.suppress(Exception):
-            btn = page.get_by_role("button", name=aria, exact=False).first
-            if btn.count() > 0 and btn.is_visible():
+            label = (btn.get_attribute("aria-label") or "").strip()
+            if not _MEDIA_RE.search(label):
+                continue
+            found = True
+            if btn.is_visible() and _media_button_should_click(btn):
                 btn.click(timeout=2000)
-                muted = True
-                logger.info("media_control_off", control=aria)
+                logger.info("prejoin_media_off", control=label[:40])
+    if found:
+        tries[id(pg)] = 99  # decisive pass done — never re-toggle this page
+
+
+def _mute_if_live(page) -> bool:
+    """Post-join safety net. Meeting-bar mic/camera buttons carry the
+    live-state labels 'Mute mic' / 'Turn camera off' (transcripts/
+    controls_menu_* proves they only render while live). Scan every
+    aria-labelled button and click the live ones — exact aria-label logic
+    (role+name substring matching would also hit 'Unmute mic')."""
+    muted = False
+    with contextlib.suppress(Exception):
+        for btn in page.query_selector_all("button[aria-label]"):
+            with contextlib.suppress(Exception):
+                if (btn.is_visible() and btn.is_enabled()
+                        and _media_button_should_click(btn)):
+                    label = (btn.get_attribute("aria-label") or "").strip()
+                    btn.click(timeout=2000)
+                    muted = True
+                    logger.info("media_control_off", control=label[:40])
     return muted
 
 
@@ -323,37 +386,81 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
             except Exception:  # noqa: BLE001 — direct links skip the launcher
                 continue
 
-        # Join state machine (90s): poll EVERY open page — the pre-join flow
-        # differs by link type: work links go straight to toggles+Join;
-        # personal links (teams.live) use the anonymous guest flow, where a
-        # NAME field appears first and "Join now" enables only once filled.
+        # Join state machine: poll EVERY open page — the pre-join flow differs
+        # by link type: work links go straight to toggles+Join; personal links
+        # (teams.live) use the anonymous guest flow, where a NAME field appears
+        # first and "Join now" enables only once filled.
         #
-        # Signing in on the pre-join screen (owner requirement: the listener
-        # joins AS the authenticated user, never "(Unverified)"): the guest
-        # flow's 'Sign in' link switches to the Microsoft login, where the
-        # saved session auto-authenticates — after which the pre-join shows
-        # the real account instead of the name field. The join loop keeps
-        # polling until either path completes.
+        # The listener joins AS the authenticated owner (never "(Unverified)"):
+        # right after the guest name it clicks the pre-join's single 'Sign in'
+        # control. The Microsoft login then appears EITHER as a new popup
+        # (context.on("page") is registered BEFORE that click, so popups are
+        # captured from birth) OR as a same-tab navigation. Any page whose URL
+        # is a Microsoft login domain is driven email -> password -> Yes/Next
+        # (creds from .env; the saved session may also auto-complete it).
+        # The authenticated pre-join has NO name field — "Join now" showing
+        # without one IS the sign-in success signal; while a login page exists,
+        # a missing "Join now" means WAIT, not fail.
+        settings = get_settings()
+
+        def _on_new_page(pg) -> None:  # playwright sync Page
+            with contextlib.suppress(Exception):
+                logger.info("new_page_opened", url=pg.url[:80])
+
+        context.on("page", _on_new_page)
+
+        def _drive_login_page(pg) -> None:  # playwright sync Page
+            """Complete a Microsoft login form (popup or same-tab hop)."""
+            with contextlib.suppress(Exception):
+                email_box = pg.locator(
+                    "input[type=email], input[name=loginfmt]").first
+                if (email_box.count() > 0 and email_box.is_visible()
+                        and settings.teams_email):
+                    email_box.fill(settings.teams_email)
+                    pg.locator("#idSIButton9, input[type=submit], "
+                               "button[type=submit]").first.click(timeout=2000)
+                    logger.info("login_email_submitted")
+                    time.sleep(2)
+            with contextlib.suppress(Exception):
+                pw_box = pg.locator("input[type=password]").first
+                if (pw_box.count() > 0 and pw_box.is_visible()
+                        and settings.teams_password):
+                    pw_box.fill(settings.teams_password)
+                    pg.locator("#idSIButton9, input[type=submit], "
+                               "button[type=submit]").first.click(timeout=2000)
+                    logger.info("login_password_submitted")
+                    time.sleep(2)
+            for label in ("Yes", "Next", "Accept"):
+                with contextlib.suppress(Exception):
+                    btn = pg.get_by_role("button", name=label, exact=True).first
+                    if btn.count() > 0 and btn.is_visible():
+                        btn.click(timeout=1500)
+                        logger.info("login_prompt_answered", label=label)
+
         joined = False
         joined_page = page
         name_filled_pages: set[int] = set()
-        joined_with_media_on = False
-        signed_in_on_prejoin = False
+        media_off_tries: dict[int, int] = {}
+        signin_pending_until = 0.0
         join_deadline = time.time() + 150  # sign-in adds a hop; poll longer
         while time.time() < join_deadline and not joined:
+            # Microsoft login surfaces first — popup OR same-tab navigation.
+            for login_pg in list(context.pages):
+                if _is_login_url(login_pg.url):
+                    _drive_login_page(login_pg)
             for candidate in context.pages:
-                if "/dl/launcher" in candidate.url:
-                    continue  # the chooser itself — nothing to join here
-                # mic/camera OFF before joining (owner: listener never broadcasts)
-                for toggle_label in ("camera", "mic", "Caméra", "Mikrofon"):
-                    with contextlib.suppress(Exception):
-                        candidate.get_by_label(toggle_label, exact=False).first.click(
-                            timeout=800)
-                # Guest flow: fill the name once, then prefer SIGNING IN over
-                # joining anonymously. The 'Sign in' link opens a Microsoft
-                # LOGIN POPUP — drive it with the owner's credentials (from
-                # env; DEC-008 amendment: the listener joins AS the owner).
-                if id(candidate) not in name_filled_pages:
+                if ("/dl/launcher" in candidate.url
+                        or _is_login_url(candidate.url)):
+                    continue  # chooser / login surface — nothing to join here
+                # mic/camera OFF before joining (owner: the listener never
+                # broadcasts) — one decisive state-checked pass per page.
+                _turn_media_off_prejoin(candidate, media_off_tries)
+                # Guest flow: fill the name ONCE, then upgrade to the verified
+                # identity via 'Sign in'. Re-filling is suppressed for 60 s
+                # after the click — the authenticated pre-join legitimately has
+                # no name field, and a refill would restart the guest flow.
+                if (time.time() >= signin_pending_until
+                        and id(candidate) not in name_filled_pages):
                     for name_sel in ("input[placeholder*='name' i]",
                                      "input[aria-label*='name' i]",
                                      "input[type='text']"):
@@ -371,7 +478,8 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
                                             sign_label, exact=False).first
                                         if sign.is_visible(timeout=800):
                                             sign.click(timeout=2000)
-                                            signed_in_on_prejoin = True
+                                            signin_pending_until = (
+                                                time.time() + 60)
                                             logger.info(
                                                 "prejoin_signin_clicked",
                                                 label=sign_label)
@@ -379,44 +487,12 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
                                 break
                         except Exception:  # noqa: BLE001
                             continue
-                # Drive the Microsoft login popup (email -> password -> Yes):
-                # the saved session may auto-fill, otherwise credentials from
-                # env TEAMS_EMAIL / TEAMS_PASSWORD complete it.
-                settings = get_settings()
-                for popup in context.pages:
-                    if ("login.microsoftonline" not in popup.url
-                            and "login.live" not in popup.url):
-                        continue
-                    with contextlib.suppress(Exception):
-                        email_box = popup.locator("input[type=email]")
-                        if email_box.count() > 0 and email_box.first.is_visible():
-                            email_box.first.fill(settings.teams_email)
-                            popup.locator("input[type=submit], "
-                                          "button[type=submit]").first.click(
-                                              timeout=2000)
-                            logger.info("popup_email_submitted")
-                            time.sleep(2)
-                    with contextlib.suppress(Exception):
-                        pw_box = popup.locator("input[type=password]")
-                        if pw_box.count() > 0 and pw_box.first.is_visible():
-                            pw_box.first.fill(settings.teams_password)
-                            popup.locator("input[type=submit], "
-                                          "button[type=submit]").first.click(
-                                              timeout=2000)
-                            logger.info("popup_password_submitted")
-                            time.sleep(2)
-                    for lbl in ("Yes", "Accept", "Next"):
-                        with contextlib.suppress(Exception):
-                            popup.get_by_role("button", name=lbl).first.click(
-                                timeout=1200)
-                # After the popup completes, the pre-join reloads with the
-                # authenticated identity — pause, then let "Join now" finish.
-                if signed_in_on_prejoin:
-                    time.sleep(3)
-                # Join button (enabled once a name is set / no name required)
+                # Join button — guest path: enabled once the name is set;
+                # authenticated path: no name field was ever required.
                 for label in ("Join now", "Jetzt beitreten", "Rejoindre"):
                     try:
-                        btn = candidate.get_by_role("button", name=label).first
+                        btn = candidate.get_by_role(
+                            "button", name=label, exact=False).first
                         if btn.is_enabled(timeout=800):
                             btn.click(timeout=3000)
                             joined = True
