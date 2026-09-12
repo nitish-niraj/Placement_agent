@@ -55,12 +55,14 @@ class Settings(BaseSettings):
     llm_timeout_seconds: int = 45
     ask_retrieve_k: int = 8  # P12 conversational search context size
 
-    # Summary fallback chain (owner decision 2026-09-12): NIM fails ->
+    # Summary fallback chain (owner decision 2026-09-12/13): NIM fails ->
     # OpenRouter chat completion -> raw-transcript fallback. Key lives ONLY
-    # in infrastructure/.env (SEC-001).
+    # in infrastructure/.env (SEC-001). Default model is the free-tier
+    # inclusionai/ling-3.0-flash-vl (manual-tested 2026-09-13: valid JSON +
+    # plain text; reasoning model -> needs generous max_tokens).
     openrouter_api_key: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
-    openrouter_model: str = "~openai/gpt-sol-latest"
+    openrouter_model: str = "inclusionai/ling-3.0-flash-vl:free"
 
     # SEC-005 kill switch — same refusal rule as the API.
     action_automation_enabled: bool = False

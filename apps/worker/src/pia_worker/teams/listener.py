@@ -713,7 +713,10 @@ def _openrouter_summary(prompt: str) -> str:
                      "X-Title": "PIA KYC summary fallback"},
             json={
                 "model": settings.openrouter_model,
-                "max_tokens": 400,  # fits small balances; summary-sized
+                # ling-3.0-flash-vl is a REASONING model: a small budget can
+                # be consumed entirely by its thinking block, leaving
+                # content=null (hit live in manual testing 2026-09-13).
+                "max_tokens": 1500,
                 "messages": [
                     {"role": "system", "content": (
                         "Summarize placement KYC session transcripts for the "
