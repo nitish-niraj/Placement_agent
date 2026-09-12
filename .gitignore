@@ -38,3 +38,7 @@ infrastructure/teams_session.json
 transcripts/
 session_check.png
 probe_*.png
+
+# dev probe screenshots (2026-09-13 hygiene)
+*_probe.png
+probe_*.png
