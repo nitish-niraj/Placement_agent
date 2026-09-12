@@ -394,31 +394,72 @@ def _dump_controls(page, tag: str) -> list[str]:
     return labels
 
 
-def _try_enable_captions(page) -> bool:
-    """Turn on live captions. The LPU tenant's meeting bar (from the control
-    dumps) exposes a 'More' button whose flyout contains a 'Captions' item —
-    click it with text-scoping (role-based lookups miss it: it renders as a
-    menuitem/div, not a button)."""
-    # strategy 1: direct captions control on the page (any role)
-    for label in ("Turn on live captions", "Turn on captions",
-                  "Live captions", "Captions"):
+def _captions_on(pg) -> bool:  # noqa: ANN001
+    """Ground truth for captions: the caption pane exists / has content, or a
+    control has flipped to the live 'Turn off captions' state."""
+    for sel in _CAPTION_SELECTORS:
         with contextlib.suppress(Exception):
-            page.get_by_text(label, exact=False).first.click(timeout=1500)
-            logger.info("captions_enabled", via="direct", label=label)
-            page.wait_for_timeout(1500)
+            if pg.locator(sel).count() > 0:
+                return True
+    with contextlib.suppress(Exception):
+        if pg.get_by_role("region",
+                          name=re.compile(r"caption", re.I)).count() > 0:
             return True
-    # strategy 2: open the 'More' flyout and click the Captions item inside it
+    with contextlib.suppress(Exception):
+        if pg.get_by_text("turn off captions",
+                          exact=False).first.is_visible():
+            return True
+    return False
+
+
+def _await_captions(pg, seconds: float = 8.0) -> bool:  # noqa: ANN001
+    end = time.time() + seconds
+    while time.time() < end:
+        if _captions_on(pg):
+            logger.info("captions_enabled_verified")
+            return True
+        with contextlib.suppress(Exception):
+            pg.wait_for_timeout(1000)
+    return False
+
+
+def _click_by_text(pg, label: str) -> bool:  # noqa: ANN001
+    with contextlib.suppress(Exception):
+        loc = pg.get_by_text(label, exact=True).last
+        if loc.count() > 0 and loc.is_visible():
+            loc.click(timeout=2000)
+            logger.info("caption_control_clicked", label=label)
+            return True
+    return False
+
+
+def _try_enable_captions(page) -> bool:
+    """Enable live captions IN THE MEETING and VERIFY the caption pane
+    appeared. The 'Captions' entry in the More flyout opens a submenu whose
+    'Turn on live captions' item is the actual toggle (docs/10 §4.4) — the
+    previous version returned success at the 'Captions' click without ever
+    checking, which is why every 2026-09-12 run ended
+    captions_enable_failed/0-byte transcript despite the menu dump showing
+    the item."""
+    # direct toggle on the bar (if this UI exposes one)
+    for label in ("Turn on live captions", "Turn on captions"):
+        if _click_by_text(page, label) and _await_captions(page):
+            return True
+    # the More flyout path (proven entry point in the Sep 9 app-shell dumps)
     with contextlib.suppress(Exception):
         page.get_by_role("button", name="More", exact=False).first.click(
-            timeout=2500)
+            timeout=3000)
         page.wait_for_timeout(1200)  # flyout animation
         _dump_controls(page, "menu")
-        for label in ("Captions", "Turn on live captions", "Live captions"):
-            with contextlib.suppress(Exception):
-                page.get_by_text(label, exact=False).first.click(timeout=2500)
-                logger.info("captions_enabled", via="more-flyout", label=label)
-                page.wait_for_timeout(1500)
-                return True
+        if _click_by_text(page, "Captions"):
+            if _await_captions(page, seconds=5):
+                return True  # some builds toggle immediately
+            page.wait_for_timeout(1000)
+            _dump_controls(page, "captions_submenu")  # evidence of the submenu
+            for label in ("Turn on live captions", "Turn on captions",
+                          "Live captions"):
+                if _click_by_text(page, label) and _await_captions(page):
+                    return True
         with contextlib.suppress(Exception):
             page.keyboard.press("Escape")
     logger.warning("captions_enable_failed")

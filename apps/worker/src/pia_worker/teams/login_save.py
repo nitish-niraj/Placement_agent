@@ -41,6 +41,17 @@ def _on_login_page(url: str) -> bool:
             or "/signin" in url)
 
 
+def _expected_account() -> str:
+    """The OFFICIAL university address from infrastructure/.env — the owner's
+    stipulation: a session trained under any other account is not acceptable."""
+    with contextlib.suppress(Exception):
+        for line in (_REPO_ROOT / "infrastructure" / ".env").read_text(
+                encoding="utf-8").splitlines():
+            if line.startswith("TEAMS_EMAIL="):
+                return line.split("=", 1)[1].strip()
+    return ""
+
+
 def main() -> None:
     """login_save [meeting-url] — phase 1 org app login (always); phase 2
     trains the consumer sign-in hop + privacy-consent cookie on the given
@@ -150,9 +161,16 @@ def main() -> None:
                      "(Next → Accept) — this is")
                 _say("  the consent cookie the listener cannot get past — → "
                      "Yes on 'Stay signed in'.")
+                expected = _expected_account()
+                if expected:
+                    _say(f"  You MUST be on the OFFICIAL account {expected} "
+                         "— the session will only")
+                    _say("  be saved when that address is visible on the "
+                         "authenticated pre-join.")
                 _say("  Leave the window on the pre-join that shows YOUR "
                      "ACCOUNT (no name box).")
-                end2 = time.time() + 300  # 5 minutes for the human steps
+                end2 = time.time() + 420  # 7 minutes for the human steps
+                verified = False
                 try:
                     while time.time() < end2:
                         signin = name_box = join = False
@@ -165,14 +183,32 @@ def main() -> None:
                             join = page.locator(
                                 "[data-tid='prejoin-join-button']").is_visible()
                         if join and not signin and not name_box:
-                            _say("Authenticated pre-join detected — saving.")
-                            break
+                            body = ""
+                            with contextlib.suppress(Exception):
+                                body = (page.text_content("body") or "")
+                            if (not expected
+                                    or expected.lower() in body.lower()):
+                                _say("Authenticated pre-join on the official "
+                                     "account — saving.")
+                                verified = True
+                                break
+                            _say(f"  Authenticated, but {expected} is NOT on "
+                                 "screen — wrong account.")
+                            _say("  Sign out / 'Use another account' and "
+                                 "complete the LPU login.")
                         time.sleep(3)
                 except KeyboardInterrupt:
-                    _say("Interrupted — saving the session as-is.")
+                    _say("Interrupted — Ctrl+C accepted; saving as-is.")
+                    verified = True
                 else:
-                    _say("Phase-2 window elapsed — saving anyway "
-                         "(cookies collected so far persist).")
+                    if not verified:
+                        _say("Phase-2 window ended without the OFFICIAL "
+                             "authenticated pre-join — refusing to overwrite "
+                             "the session file. Re-run and complete the LPU "
+                             "login + notice acceptance.")
+                        with contextlib.suppress(Exception):
+                            browser.close()
+                        return
 
         context.storage_state(path=str(_STATE_FILE))
         _say(f"Signed in — session saved: {_STATE_FILE} "
