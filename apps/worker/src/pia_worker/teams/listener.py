@@ -644,19 +644,23 @@ def _click_by_text(pg, label: str) -> bool:  # noqa: ANN001
 
 
 def _try_enable_captions(page) -> bool:
-    """Enable live captions IN THE MEETING and VERIFY the caption pane
-    appeared. The 'Captions' entry in the More flyout opens a submenu whose
-    'Turn on live captions' item is the actual toggle (docs/10 §4.4) — the
-    previous version returned success at the 'Captions' click without ever
-    checking, which is why every 2026-09-12 run ended
-    captions_enable_failed/0-byte transcript despite the menu dump showing
-    the item."""
+    """Enable live captions IN THE MEETING — as a TOGGLE-AWARE state machine
+    (run 12 lesson): 'Show live captions' switches ON silently; a second
+    click switches it back OFF. So: check already-on first, click at most ONE
+    toggle per pass with a generous verify window, and let the outer retry
+    re-ladder. NEVER click 'Record and transcribe' — that starts persistent
+    cloud transcription/recording (consent-flagged); the owner wants only
+    transient live captions for the transcript.
+    Owner path (2026-09-12): More → Language and speech → Show live captions."""
+    if _captions_on(page):
+        logger.info("captions_already_on")
+        return True
     # direct toggle on the bar (if this UI exposes one)
     for label in ("Show live captions", "Turn on live captions",
                   "Turn on captions"):
-        if _click_by_text(page, label) and _await_captions(page):
-            return True
-    # the More flyout path (proven entry point in the Sep 9 app-shell dumps)
+        if _click_by_text(page, label):
+            return _await_captions(page, seconds=10) or _captions_on(page)
+    # the More flyout path
     with contextlib.suppress(Exception):
         # ^More$ ONLY — run 8 evidence: name="More", exact=False matched the
         # app-shell sidebar's "Settings and more" gear and dumped its menu.
@@ -665,37 +669,27 @@ def _try_enable_captions(page) -> bool:
             timeout=3000)
         page.wait_for_timeout(1200)  # flyout animation
         _dump_controls(page, "menu")
-        # Older builds expose 'Captions' directly; the current one moved it
-        # under 'Language and speech' / 'Record and transcribe' (run 9 flyout
-        # dump: 'Record and transcribe | Language and speech | Settings').
-        for entry in ("Captions", "Live captions", "Language and speech",
-                      "Record and transcribe"):
+        for entry in ("Captions", "Language and speech"):
             if not _click_by_text(page, entry):
                 continue
-            if _await_captions(page, seconds=4):
-                return True  # some builds toggle immediately
+            if _captions_on(page) or _await_captions(page, seconds=4):
+                return True  # older builds toggle straight from the flyout
             page.wait_for_timeout(800)
             _dump_controls(page, "captions_submenu")  # submenu evidence
-            # Owner-supplied path (2026-09-12): More → Language and speech →
-            # 'Show live captions'.
             for label in ("Show live captions", "Turn on live captions",
-                          "Live captions", "Turn on captions", "Captions"):
-                if _click_by_text(page, label) and _await_captions(page):
-                    return True
-            with contextlib.suppress(Exception):  # switch-style toggle
-                sw = page.get_by_role(
-                    "switch", name=re.compile(r"caption", re.I)).first
-                if sw.count() > 0 and sw.is_visible():
-                    sw.click(timeout=2000)
-                    if _await_captions(page):
-                        return True
-            # entry didn't yield captions — back to the flyout root
+                          "Turn on captions"):
+                if _click_by_text(page, label):
+                    # ONE toggle click per pass, then verify (allow silence —
+                    # _captions_on also fires on the 'Hide…' label). No
+                    # second click here: the outer retry re-checks
+                    # already-on before touching anything again.
+                    with contextlib.suppress(Exception):
+                        page.keyboard.press("Escape")
+                    return _await_captions(page, seconds=12) \
+                        or _captions_on(page)
             with contextlib.suppress(Exception):
                 page.keyboard.press("Escape")
-            page.get_by_role("button", name=re.compile(r"^(more|…)$",
-                                                       re.I)).first.click(
-                timeout=2000)
-            page.wait_for_timeout(800)
+            break  # one entry per pass; next retry starts fresh from More
         with contextlib.suppress(Exception):
             page.keyboard.press("Escape")
     logger.warning("captions_enable_failed")
