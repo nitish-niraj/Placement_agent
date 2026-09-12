@@ -53,24 +53,114 @@ _CAPTION_SELECTORS = [
 ]
 
 
-def _relay_form_link(link: str) -> None:
-    """Instant Telegram relay — the owner's primary ask (fills the form himself)."""
+def _safe_wait(pg, ms: int) -> None:  # noqa: ANN001
+    """wait_for_timeout that survives a closed tab — run 11 died on the
+    first unguarded call after Teams replaced the join tab post-auth."""
+    with contextlib.suppress(Exception):
+        if not pg.is_closed():
+            pg.wait_for_timeout(ms)
+
+
+def _resolve_live_page(context, old):  # noqa: ANN001
+    """Find the page that actually hosts the meeting: the auth redirect can
+    CLOSE the tab whose Join button we clicked (run 11 crash). A meeting tab
+    shows 'Leave' or the lobby screen; fall back to any live tab."""
+    for _ in range(20):
+        for pg in context.pages:
+            with contextlib.suppress(Exception):
+                if pg.is_closed():
+                    continue
+                if (pg.locator("button:has-text('Leave')").count() > 0
+                        or pg.locator(
+                            "[data-tid='calling-lobby-screen']").count() > 0):
+                    return pg
+        with contextlib.suppress(Exception):
+            if not old.is_closed() and ("v2/" in old.url
+                                        or "/meet" in old.url):
+                return old
+        time.sleep(1)
+    for pg in context.pages:
+        with contextlib.suppress(Exception):
+            if not pg.is_closed():
+                return pg
+    return old
+
+
+def _telegram_send(*, text: str | None = None, photo: bytes | None = None,
+                   caption: str | None = None) -> bool:
+    """One Telegram door: sendMessage or sendPhoto. Best-effort, never fatal."""
     settings = get_settings()
+    base = f"https://api.telegram.org/bot{settings.telegram_bot_token}"
+    try:
+        if photo is not None:
+            httpx.post(
+                f"{base}/sendPhoto",
+                data={"chat_id": settings.telegram_chat_id,
+                      "caption": caption or ""},
+                files={"photo": photo}, timeout=30)
+        else:
+            httpx.post(
+                f"{base}/sendMessage",
+                data={"chat_id": settings.telegram_chat_id,
+                      "text": text or "", "parse_mode": "HTML",
+                      "disable_web_page_preview": "true"},
+                timeout=20)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("telegram_send_failed", error=str(exc)[:120])
+        return False
+
+
+def _send_join_proof(pg, identity: str) -> None:  # noqa: ANN001
+    """Owner's ask: a screenshot on Telegram proving the join happened."""
+    shot = _TRANSCRIPT_DIR / ("join_proof_"
+                              + datetime.now().strftime("%Y%m%d_%H%M%S")
+                              + ".png")
+    shot.parent.mkdir(parents=True, exist_ok=True)
+    with contextlib.suppress(Exception):
+        pg.screenshot(path=str(shot), timeout=15000)
+        _telegram_send(
+            photo=shot.read_bytes(),
+            caption=(f"✅ PIA joined the Teams session (identity: "
+                     f"{identity}, LPU account) at "
+                     + datetime.now().strftime("%H:%M:%S")
+                     + " — mic/camera verified off, captions state shown "
+                       "in-meeting."))
+
+
+# Self-introductions in captions/chat ('this is X', "I'm X from Y") — the
+# presenter/teacher name the owner wants alongside the form-link relay.
+_SELF_INTRO = re.compile(
+    r"\b(?:i am|i'm|this is|my name is|name is|name's|here's|"
+    r"joining us(?:\s+today)? is|with (?:me|us)(?:\s+today)? is)\s+"
+    r"((?:[A-Z][A-Za-z. '-]{1,20}\s){0,3}[A-Z][A-Za-z. '-]{1,20})")
+_NOT_NAMES = {"Microsoft", "Sorry", "Hello", "Hi", "Thanks", "Okay", "Yes",
+              "Team", "Everyone", "Someone", "Back", "Here"}
+
+
+def _presenter_names(caption_text: str) -> list[str]:
+    """Best-guess names of whoever led the session, most-mentioned first."""
+    counts: dict[str, int] = {}
+    for m in _SELF_INTRO.finditer(caption_text):
+        nm = " ".join(m.group(1).split())[:40]
+        if not nm or nm.split()[0] in _NOT_NAMES:
+            continue
+        counts[nm] = counts.get(nm, 0) + 1
+    return [n for n, _ in sorted(counts.items(), key=lambda kv: -kv[1])][:3]
+
+
+def _relay_form_link(link: str, presenters: tuple[str, ...] = ()) -> None:
+    """Instant Telegram relay — the owner's primary ask (fills the form
+    himself), plus the teacher/presenter name if the session revealed one."""
+    who = (", ".join(presenters) if presenters
+           else "not detected in captions/chat yet")
     text = (
         "📝 <b>KYC feedback form is up</b>\n"
         f"<a href='{link}'>Fill it now (manually — always yours)</a>\n"
-        "The listener will leave the session shortly."
-    )
-    try:
-        httpx.post(
-            f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage",
-            json={"chat_id": settings.telegram_chat_id, "text": text,
-                  "parse_mode": "HTML", "disable_web_page_preview": True},
-            timeout=15,
-        )
-        logger.info("form_link_relayed", link=link[:60])
-    except Exception as exc:  # noqa: BLE001 — relay is best-effort
-        logger.warning("form_relay_failed", error=str(exc)[:120])
+        f"👤 Teacher/presenter: {who}\n"
+        "The listener will leave the session shortly.")
+    if _telegram_send(text=text):
+        logger.info("form_link_relayed", link=link[:60], presenters=who)
 
 
 def _extract_chat_links(page) -> list[str]:
@@ -117,21 +207,21 @@ def _extract_captions(page, seen: set[str]) -> list[str]:
     return new
 
 
-# Media-toggle state detection (pre-join + meeting bar). The Teams UI labels
-# these buttons by CURRENT state — from transcripts/controls_* dumps: "Mute
-# mic"/"Turn camera off" render only while the device is LIVE; off-state labels
-# are "Unmute mic"/"Turn camera on"/"Camera off". Substring name-matching is
-# unsafe ("Unmute mic" contains "mute mic"), hence anchored regexes + the
-# live-check winning over the dead-check ("Turn camera off" contains
-# "camera off" but means LIVE).
+# Media-toggle state detection (pre-join + meeting bar). Teams labels these
+# buttons by CURRENT state: 'Mute mic'/'Turn camera off' render only while
+# LIVE; 'Unmute mic'/'Turn camera on' mean the device is OFF. ACTION phrases
+# take precedence over STATE phrases (run 9 bug: 'turn camera on' contains
+# the state phrase 'camera on' — priority matching turned the camera ON).
 _MEDIA_RE = re.compile(r"camera|video|\bmic\b|microphone", re.IGNORECASE)
-_LIVE_RE = re.compile(
-    r"turn (the )?(camera|video|mic|microphone) off|\bmute\b"
-    r"|\b(mic|camera|video) on\b|with (the )?(camera|mic|microphone) on",
+_LIVE_ACTION_RE = re.compile(
+    r"turn (the )?(camera|video|mic|microphone) off|\bmute\b", re.IGNORECASE)
+_DEAD_ACTION_RE = re.compile(
+    r"turn (the )?(camera|video|mic|microphone) on|unmute", re.IGNORECASE)
+_LIVE_STATE_RE = re.compile(
+    r"\b(mic|camera|video)( is)? on\b|with (the )?(camera|mic|microphone) on",
     re.IGNORECASE)
-_DEAD_RE = re.compile(
-    r"turn (the )?(camera|video|mic|microphone) on|unmute"
-    r"|\b(mic|microphone|camera|video)( is)? off\b", re.IGNORECASE)
+_DEAD_STATE_RE = re.compile(
+    r"\b(mic|microphone|camera|video)( is)? off\b", re.IGNORECASE)
 
 
 def _is_login_url(url: str) -> bool:
@@ -147,9 +237,13 @@ def _media_button_should_click(btn) -> bool:  # noqa: ANN001 — playwright hand
         aria = (btn.get_attribute("aria-label") or "").strip()
         if not aria or not _MEDIA_RE.search(aria):
             return False
-        if _LIVE_RE.search(aria):
+        if _LIVE_ACTION_RE.search(aria):
             return True
-        if _DEAD_RE.search(aria):
+        if _DEAD_ACTION_RE.search(aria):
+            return False
+        if _LIVE_STATE_RE.search(aria):
+            return True
+        if _DEAD_STATE_RE.search(aria):
             return False
         pressed = (btn.get_attribute("aria-pressed") or "").lower()
         if pressed in ("true", "false"):
@@ -189,7 +283,13 @@ def _prejoin_state(pg) -> str:  # noqa: ANN001 — playwright sync Page
     with contextlib.suppress(Exception):
         pc = pg.get_by_text("Privacy and cookies", exact=False).first
         if pc.count() > 0 and pc.is_visible():
-            parts.append("consent=y")
+            # ...but only OUTSIDE the login dialog — probe 5: that dialog's
+            # footer carries the same 'Privacy and cookies' text.
+            try:
+                in_dialog = pg.locator("[role='dialog'] input").count() > 0
+            except Exception:  # noqa: BLE001
+                in_dialog = False
+            parts.append("dialog=y" if in_dialog else "consent=y")
     with contextlib.suppress(Exception):
         if pg.locator("[data-tid='calling-lobby-screen']").count() > 0:
             parts.append("lobby=y")
@@ -238,27 +338,120 @@ def _click_signin(pg) -> bool:  # noqa: ANN001
     return False
 
 
-def _dismiss_consent(pg, steps: dict[int, int]) -> str:  # noqa: ANN001
-    """The pre-join 'Sign in' click first surfaces a Microsoft 'Privacy and
-    cookies' NOTICE FLYOUT that overlays the pre-join and silently swallows
-    every later click — including Join now's. Its buttons are only Close +
-    'Next' (informational carousel) + a privacy-statement link — probe 4
-    proof, 2026-09-12 — so the play is: accept if an accept button ever
-    appears, step Next ONCE, otherwise CLOSE it (a stuck-open flyout blocked
-    every join on 2026-09-09/12; closing is what unblocked run 5's join).
+def _drive_signin_dialog(pg, settings) -> bool:  # noqa: ANN001
+    """Advance the EMBEDDED Microsoft sign-in dialog the pre-join 'Sign in'
+    link opens IN-PAGE (probe 5, 2026-09-12: role=dialog, 'Enter your email
+    or phone number' + Next; no popup, no iframe, no login URL — which is
+    why every login-surface detector missed it and auth never happened).
+    CASES, each detected from the dialog's own content, per cycle:
+      1. 'Enter your email or phone number'  -> fill TEAMS_EMAIL, Next
+      2. 'Pick an account' (cached list)     -> click the LPU row
+      3. password screen                     -> fill TEAMS_PASSWORD, Next
+      4. 'Stay signed in?'                   -> Yes
+      5. MFA / 'Let's confirm it's you'      -> leave open, log for phone
+      6. credentials error                   -> loud warning (owner fixes
+         .env; the guest fallback still joins)
+    Returns True while a dialog is being worked on."""
+    try:
+        dlg = pg.locator("[role='dialog']").first
+        if dlg.count() == 0 or not dlg.is_visible():
+            return False
+        dtxt = (dlg.text_content() or "").lower()
+    except Exception:  # noqa: BLE001
+        return False
+    worked = False
+    if any(k in dtxt for k in ("wrong password", "incorrect password",
+                               "credentials that don't match",
+                               "we couldn't find an account")):
+        logger.error("signin_dialog_credentials_error",
+                     hint="check TEAMS_EMAIL/TEAMS_PASSWORD in "
+                          "infrastructure/.env — joining as guest instead")
+        with contextlib.suppress(Exception):
+            dlg.get_by_role("button", name="Back",
+                            exact=True).first.click(timeout=1500)
+        return False
+    # Case 3: password (checked first — MS can prefill the email and show it)
+    with contextlib.suppress(Exception):
+        pw = dlg.locator("input[type=password]").first
+        if pw.count() > 0 and pw.is_visible() and settings.teams_password:
+            if (pw.input_value() or "") != settings.teams_password:
+                pw.fill(settings.teams_password)
+                logger.info("signin_dialog_password_filled")
+            dlg.get_by_role("button", name=re.compile(
+                r"^(next|sign in)$", re.I)).first.click(timeout=2000)
+            logger.info("signin_dialog_password_submitted")
+            worked = True
+    # Case 1: email/phone input
+    with contextlib.suppress(Exception):
+        em = dlg.locator(
+            "input[type=email], input[name=loginfmt], "
+            "input[type=tel], input[type=text]").first
+        if (not worked and em.count() > 0 and em.is_visible()
+                and settings.teams_email):
+            if (em.input_value() or "") != settings.teams_email:
+                em.fill(settings.teams_email)
+                logger.info("signin_dialog_email_filled",
+                            account=settings.teams_email)
+                dlg.get_by_role("button", name=re.compile(
+                    r"^next$", re.I)).first.click(timeout=2000)
+            worked = True
+    # Case 2: cached-account picker (no input, email rows to click)
+    with contextlib.suppress(Exception):
+        if (not worked and settings.teams_email
+                and ("pick an account" in dtxt
+                     or "choose an account" in dtxt
+                     or settings.teams_email in dtxt)):
+            row = dlg.get_by_text(settings.teams_email,
+                                  exact=False).first
+            if row.count() > 0 and row.is_visible():
+                row.click(timeout=2000)
+                logger.info("signin_dialog_account_picked",
+                            account=settings.teams_email)
+                worked = True
+    # Case 4: 'Stay signed in?'
+    with contextlib.suppress(Exception):
+        yes = dlg.get_by_role("button", name="Yes", exact=True).first
+        if not worked and yes.count() > 0 and yes.is_visible():
+            yes.click(timeout=2000)
+            logger.info("signin_dialog_stay_signed_in_yes")
+            worked = True
+    # Case 5: MFA — surface it; the owner approves on the phone while the
+    # join loop holds the guest join (dialog activity keeps extending it).
+    if not worked and any(k in dtxt for k in ("authenticator",
+                                              "we sent a code",
+                                              "enter the code", "text us",
+                                              "confirm it's you",
+                                              "let's protect your account")):
+        logger.warning("signin_dialog_mfa_pending",
+                       hint="approve on the phone / enter the code")
+        worked = True
+    return worked
 
-    Matching is by EQUAL textContent of real <button> elements — the flyout
-    buttons carry NO role/aria attrs, and substring matching is dangerous:
-    has-text('OK') matches 'Privacy and cookies' and pops the statement."""
+
+def _dismiss_consent(pg, steps: dict[int, int]) -> str:  # noqa: ANN001
+    """Close a genuine 'Privacy and cookies' NOTICE flyout if one exists.
+
+    PROBE 5 (2026-09-12) showed the flyout with 'Close | Next | Privacy and
+    cookies' that blocked every join is NOT a notice — it is the EMBEDDED
+    Microsoft sign-in dialog ("Enter your email or phone number" + Next),
+    which _drive_signin_dialog fills. So this only acts when the text appears
+    with NO dialog input present (a real notice), and NEVER while the login
+    dialog is on screen — closing that was the self-sabotage that kept every
+    run on guest identity.
+    """
     try:
         head = pg.get_by_text("Privacy and cookies", exact=False).first
         if head.count() == 0 or not head.is_visible():
             return ""
-    except Exception:  # noqa: BLE001 — flyout gone / DOM shifted
+    except Exception:  # noqa: BLE001 — DOM shifted
         return ""
+    try:
+        if pg.locator("[role='dialog'] input").count() > 0:
+            return ""  # live login dialog — NOT consent, hands off
+    except Exception:  # noqa: BLE001
+        pass
     accept_words = {"accept all", "accept", "allow all", "i agree",
-                    "confirm choices", "confirm my choices", "got it",
-                    "yes, accept all"}
+                    "confirm choices", "confirm my choices", "got it"}
     accept_btn = next_btn = close_btn = None
     buttons: list = []
     with contextlib.suppress(Exception):
@@ -272,9 +465,7 @@ def _dismiss_consent(pg, steps: dict[int, int]) -> str:  # noqa: ANN001
                 accept_btn = btn
             elif txt == "next" and next_btn is None:
                 next_btn = btn
-            elif (txt == "close"
-                  or "close" in (btn.get_attribute("aria-label") or "")
-                  .lower()) and close_btn is None:
+            elif txt == "close" and close_btn is None:
                 close_btn = btn
     if accept_btn is not None:
         with contextlib.suppress(Exception):
@@ -292,9 +483,7 @@ def _dismiss_consent(pg, steps: dict[int, int]) -> str:  # noqa: ANN001
             close_btn.click(timeout=2000)
         logger.info("consent_flyout_closed")
         return "closed"
-    with contextlib.suppress(Exception):
-        pg.keyboard.press("Escape")
-    return "closed"
+    return ""
 
 
 def _turn_media_off_prejoin(pg, tries: dict[int, int]) -> None:  # noqa: ANN001
@@ -409,6 +598,14 @@ def _captions_on(pg) -> bool:  # noqa: ANN001
         if pg.get_by_text("turn off captions",
                           exact=False).first.is_visible():
             return True
+    with contextlib.suppress(Exception):
+        if pg.get_by_text("turn off live captions",
+                          exact=False).first.is_visible():
+            return True
+    with contextlib.suppress(Exception):
+        if pg.get_by_text("hide live captions",
+                          exact=False).first.is_visible():
+            return True
     return False
 
 
@@ -424,12 +621,25 @@ def _await_captions(pg, seconds: float = 8.0) -> bool:  # noqa: ANN001
 
 
 def _click_by_text(pg, label: str) -> bool:  # noqa: ANN001
-    with contextlib.suppress(Exception):
-        loc = pg.get_by_text(label, exact=True).last
-        if loc.count() > 0 and loc.is_visible():
-            loc.click(timeout=2000)
-            logger.info("caption_control_clicked", label=label)
-            return True
+    """Click the most button-like element carrying `label` — tried as exact
+    text, accessible NAME (aria-label / nested-span labels — run 10: the More
+    flyout's 'Language and speech'/'Record and transcribe' items have no
+    clickable exact-text node), and loose text. Visible-only, never raises."""
+    rx = re.compile(rf"\b{re.escape(label)}\b", re.I)
+    attempts = (
+        lambda: pg.get_by_text(label, exact=True),
+        lambda: pg.get_by_role("menuitem", name=rx),
+        lambda: pg.get_by_role("button", name=rx),
+        lambda: pg.locator(f"[aria-label*='{label}' i],[title*='{label}' i]"),
+        lambda: pg.get_by_text(label, exact=False),
+    )
+    for make in attempts:
+        with contextlib.suppress(Exception):
+            loc = make().last
+            if loc.count() > 0 and loc.is_visible():
+                loc.click(timeout=2000)
+                logger.info("caption_control_clicked", label=label)
+                return True
     return False
 
 
@@ -442,38 +652,70 @@ def _try_enable_captions(page) -> bool:
     captions_enable_failed/0-byte transcript despite the menu dump showing
     the item."""
     # direct toggle on the bar (if this UI exposes one)
-    for label in ("Turn on live captions", "Turn on captions"):
+    for label in ("Show live captions", "Turn on live captions",
+                  "Turn on captions"):
         if _click_by_text(page, label) and _await_captions(page):
             return True
     # the More flyout path (proven entry point in the Sep 9 app-shell dumps)
     with contextlib.suppress(Exception):
-        page.get_by_role("button", name="More", exact=False).first.click(
+        # ^More$ ONLY — run 8 evidence: name="More", exact=False matched the
+        # app-shell sidebar's "Settings and more" gear and dumped its menu.
+        page.get_by_role("button", name=re.compile(r"^(more|…)$",
+                                                   re.I)).first.click(
             timeout=3000)
         page.wait_for_timeout(1200)  # flyout animation
         _dump_controls(page, "menu")
-        if _click_by_text(page, "Captions"):
-            if _await_captions(page, seconds=5):
+        # Older builds expose 'Captions' directly; the current one moved it
+        # under 'Language and speech' / 'Record and transcribe' (run 9 flyout
+        # dump: 'Record and transcribe | Language and speech | Settings').
+        for entry in ("Captions", "Live captions", "Language and speech",
+                      "Record and transcribe"):
+            if not _click_by_text(page, entry):
+                continue
+            if _await_captions(page, seconds=4):
                 return True  # some builds toggle immediately
-            page.wait_for_timeout(1000)
-            _dump_controls(page, "captions_submenu")  # evidence of the submenu
-            for label in ("Turn on live captions", "Turn on captions",
-                          "Live captions"):
+            page.wait_for_timeout(800)
+            _dump_controls(page, "captions_submenu")  # submenu evidence
+            # Owner-supplied path (2026-09-12): More → Language and speech →
+            # 'Show live captions'.
+            for label in ("Show live captions", "Turn on live captions",
+                          "Live captions", "Turn on captions", "Captions"):
                 if _click_by_text(page, label) and _await_captions(page):
                     return True
+            with contextlib.suppress(Exception):  # switch-style toggle
+                sw = page.get_by_role(
+                    "switch", name=re.compile(r"caption", re.I)).first
+                if sw.count() > 0 and sw.is_visible():
+                    sw.click(timeout=2000)
+                    if _await_captions(page):
+                        return True
+            # entry didn't yield captions — back to the flyout root
+            with contextlib.suppress(Exception):
+                page.keyboard.press("Escape")
+            page.get_by_role("button", name=re.compile(r"^(more|…)$",
+                                                       re.I)).first.click(
+                timeout=2000)
+            page.wait_for_timeout(800)
         with contextlib.suppress(Exception):
             page.keyboard.press("Escape")
     logger.warning("captions_enable_failed")
     return False
 
 
-def _summarize(transcript_text: str, form_link: str | None) -> str:
+def _summarize(transcript_text: str, form_link: str | None,
+               presenters: tuple[str, ...] = ()) -> str:
     """LLM summary of the discussion from the captured captions; deterministic
-    fallback returns the raw transcript (source-backed, never invented)."""
+    fallback returns the raw transcript (source-backed, never invented).
+    `presenters` = names from caption self-introductions (the LLM only picks
+    among them — never invents)."""
+    who = ("Name candidates for the recruiter/teacher who led the session: "
+           + ", ".join(presenters) + ". Say who led it if the text shows it. "
+           if presenters else "")
     prompt = (
         "This is the live-captions transcript of a company KYC information "
         "session. Summarize for the student: the company, the designation/role "
-        "discussed, package/salary if mentioned, and key points. Use only this "
-        "text.\n\nTRANSCRIPT:\n" + transcript_text[:12000]
+        "discussed, package/salary if mentioned, and key points. " + who +
+        "Use only this text.\n\nTRANSCRIPT:\n" + transcript_text[:12000]
     )
     try:
         summary: MeetingSummary = NIMProvider().complete_structured(
@@ -637,6 +879,7 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
 
         joined = False
         joined_page = page
+        joined_identity = "unknown"
         name_filled_pages: set[int] = set()
         media_off_tries: dict[int, int] = {}
         consent_steps: dict[int, int] = {}
@@ -673,9 +916,22 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
                 # Consent flyout blocks ALL clicks underneath it — clear it
                 # first, every cycle (accept preferred; see helper).
                 consent = _dismiss_consent(candidate, consent_steps)
+                # THE auth surface (probe 5): an EMBEDDED in-page dialog.
+                # Fill/advance it every cycle and keep holding the guest join
+                # while it progresses — auth completing removes the name field
+                # and the Sign-in link, which frees the join below.
+                if _drive_signin_dialog(candidate, settings):
+                    signin_pending_until = max(
+                        signin_pending_until,
+                        min(join_deadline - 3, time.time() + 45))
                 # mic/camera OFF before joining (owner: the listener never
                 # broadcasts) — tid-anchored, text-verified, self-reverting.
                 _turn_media_off_prejoin(candidate, media_off_tries)
+                # Labelled toggles pass (covers the app-shell pre-join after
+                # the auth hop): the classifier only fires on LIVE-state
+                # labels ('Mute mic'/'Turn camera off'); 'Unmute mic'/'Turn
+                # camera on' are off-state and untouched — idempotent.
+                _mute_if_live(candidate)
                 guest_screen = "signin=y" in state
                 # The hop stalled on a consent screen (accepted just now) or
                 # the click was a no-op (probe v2: on anon light meetings
@@ -738,11 +994,12 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
                                 btn.click(timeout=3000)
                                 joined = True
                                 joined_page = candidate
-                                logger.info(
-                                    "joined_as",
-                                    identity="authenticated"
-                                    if "signin=n" in state and "name=none"
-                                    in state else "guest")
+                                joined_identity = (
+                                    "authenticated"
+                                    if "signin=n" in state
+                                    and "name=none" in state else "guest")
+                                logger.info("joined_as",
+                                            identity=joined_identity)
                                 break
                         except Exception as exc:  # noqa: BLE001
                             # An ENABLED button whose click times out =
@@ -781,31 +1038,67 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
             browser.close()
             return "join_failed"
         logger.info("listener_joined")
-        # A guest join can stall in the LOBBY (calling-lobby-screen — proven
-        # live 2026-09-12) until the host admits. Surface it and wait, so a
-        # silent 'joined' never reads as a working listener.
+        # Teams can REPLACE the join tab after the auth redirect — run 11's
+        # crash: the tab whose 'Join now' we clicked was closed and the next
+        # unguarded call threw TargetClosedError, killing the whole run.
+        page = _resolve_live_page(context, page)
         with contextlib.suppress(Exception):
-            if page.locator("[data-tid='calling-lobby-screen']").count() > 0:
-                logger.warning("listener_in_lobby",
-                               hint="waiting for host to admit")
-                lobby_end = time.time() + 120
-                while time.time() < lobby_end and page.locator(
-                        "[data-tid='calling-lobby-screen']").count() > 0:
-                    page.wait_for_timeout(3000)
-                logger.info("lobby_wait_over",
-                            still_waiting=page.locator(
-                                "[data-tid='calling-lobby-screen']").count()
-                            > 0)
-        _dump_controls(page, "joined")  # evidence for captions/bar selectors
-        _open_chat_panel(page)      # form links land in the meeting chat
-        _try_enable_captions(page)
+            if page.is_closed():
+                logger.error("no_live_meeting_page")
+                browser.close()
+                return "join_lost_after_click"
 
-        # In-meeting safety: the pre-join toggles sometimes miss (config, race)
-        # — if media is still ON after joining, mute mic + turn camera off NOW.
-        page.wait_for_timeout(2500)  # let the meeting bar render
-        joined_with_media_on = _mute_if_live(page)
-        if joined_with_media_on:
-            logger.info("media_muted_after_join")
+        # LOBBY watch: a guest join waits on calling-lobby-screen until the
+        # host admits (the authenticated join normally skips it). Surface it
+        # loudly — a silent 'joined' in a lobby is NOT a working listener.
+        in_lobby = False
+        with contextlib.suppress(Exception):
+            in_lobby = page.locator(
+                "[data-tid='calling-lobby-screen']").count() > 0
+        if in_lobby:
+            logger.warning("listener_in_lobby", hint="host must admit")
+            lobby_end = time.time() + 120
+            while time.time() < lobby_end:
+                with contextlib.suppress(Exception):
+                    in_lobby = page.locator(
+                        "[data-tid='calling-lobby-screen']").count() > 0
+                if not in_lobby:
+                    break
+                time.sleep(3)
+            logger.info("lobby_wait_over", still_waiting=in_lobby)
+
+        # Wait for the REAL meeting bar (the 'Leave' control) — run 8's
+        # caption attempt 5 s after join hit the app-shell sidebar instead
+        # (its flyout dump: 'Settings and more' gear, not the call bar).
+        with contextlib.suppress(Exception):
+            page.wait_for_selector("button:has-text('Leave')", timeout=30_000)
+
+        # Media OFF GUARANTEE (owner: never broadcast). The single pre-join
+        # pass can race the bar's render, so RE-CHECK until the classifier
+        # finds no live-state control — clicking anything still on. The
+        # verified outcome also rides the join-proof caption below.
+        media_clear = False
+        for _ in range(8):
+            if not _mute_if_live(page):
+                media_clear = True
+                break
+            _safe_wait(page, 1500)
+        logger.info("media_off_confirmed" if media_clear
+                    else "media_off_UNCONFIRMED")
+        _dump_controls(page, "joined")  # evidence for captions/bar selectors
+
+        # Join proof: screenshot -> Telegram (owner's ask).
+        _send_join_proof(page, joined_identity)
+
+        # Captions (owner path: More → Language and speech → Show live
+        # captions), retried until the caption pane is VERIFIED on screen.
+        captions_on = False
+        for _ in range(4):
+            if _try_enable_captions(page):
+                captions_on = True
+                break
+            _safe_wait(page, 6000)
+        _open_chat_panel(page)      # form links land in the meeting chat
 
         transcript_file = _TRANSCRIPT_DIR / (
             "kyc_" + datetime.now().strftime("%Y%m%d_%H%M") + ".txt")
@@ -815,27 +1108,43 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
 
         relayed: set[str] = set()
         form_link: str | None = None
+        all_segments: list[str] = []
         deadline = time.time() + max_minutes * 60
+        next_caption_retry = time.time() + 30
+
+        def _drain() -> None:
+            for segment in _extract_captions(page, seen_captions):
+                all_segments.append(segment)
+                transcript_handle.write(segment + "\n")
+                transcript_handle.flush()
+
         try:
             while time.time() < deadline:
-                for segment in _extract_captions(page, seen_captions):
-                    transcript_handle.write(segment + "\n")
-                    transcript_handle.flush()
+                with contextlib.suppress(Exception):
+                    if page.is_closed():
+                        logger.warning("meeting_page_closed_mid_watch")
+                        break
+                if not captions_on and time.time() > next_caption_retry:
+                    next_caption_retry = time.time() + 30
+                    if _try_enable_captions(page):
+                        captions_on = True
+                _drain()
                 for link in _extract_chat_links(page):
                     if link not in relayed:
                         relayed.add(link)
                         form_link = link
-                        _relay_form_link(link)
+                        # Link + the teacher/presenter name heard in the
+                        # captions so far (self-introductions) — owner's ask.
+                        _relay_form_link(link, tuple(_presenter_names(
+                            " ".join(all_segments))))
                 if relayed:
-                    # form is up: stay 2 more minutes (final announcements and
-                    # the last captions land here), then leave automatically
-                    # (DEC-008 amendment flow — owner asked for this explicitly).
-                    leave_at = time.time() + 120
-                    logger.info("form_found_leaving_in_2_minutes")
+                    # Form is up: brief grace for the trailing captions (the
+                    # host usually names themselves around the link drop),
+                    # then leave automatically — the relay has gone out.
+                    leave_at = time.time() + 30
+                    logger.info("form_found_leaving_in_30s")
                     while time.time() < leave_at:
-                        for segment in _extract_captions(page, seen_captions):
-                            transcript_handle.write(segment + "\n")
-                            transcript_handle.flush()
+                        _drain()
                         time.sleep(5)
                     break
                 time.sleep(5)
@@ -847,18 +1156,12 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
 
     transcript_text = transcript_file.read_text(encoding="utf-8").strip()
     if transcript_text:
-        summary = _summarize(transcript_text, form_link)
-        try:
-            settings = get_settings()
-            httpx.post(
-                f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage",
-                json={"chat_id": settings.telegram_chat_id, "text": summary,
-                      "parse_mode": "HTML", "disable_web_page_preview": True},
-                timeout=15,
-            )
+        presenters = tuple(_presenter_names(transcript_text))
+        summary = _summarize(transcript_text, form_link, presenters)
+        if presenters:
+            summary = f"👤 Presenter: {', '.join(presenters)}\n" + summary
+        if _telegram_send(text=summary):
             logger.info("session_summary_sent")
-        except Exception as exc:  # noqa: BLE001 — best-effort
-            logger.warning("summary_send_failed", error=str(exc)[:120])
     else:
         summary = "no captions captured"
         logger.info("no_transcript_captured")
