@@ -101,6 +101,26 @@ services:
       redis:
         condition: service_healthy
 
+  # Ask PIA over Telegram (P12 extension): long-polling bridge from the
+  # owner's Telegram chat to pia_worker.search.answer.ask_question. Same
+  # worker image (monorepo wheel), different entrypoint; no ports, owner-
+  # gated (TELEGRAM_CHAT_ID only), disable with TELEGRAM_ASK_ENABLED=false.
+  telegram-ask:
+    restart: unless-stopped
+    build:
+      context: ..
+      dockerfile: apps/worker/Dockerfile
+    command: python -m pia_worker.telegram_ask
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-pia}:${POSTGRES_PASSWORD:-pia}@postgres:5432/${POSTGRES_DB:-pia}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   # Evolution API — WhatsApp connector (P1, F-004/005). Image pinned per Q4:
   # maintained image is evoapicloud/evolution-api (atendai/ is stale at v2.2.3).
   evolution-api:

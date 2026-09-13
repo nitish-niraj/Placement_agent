@@ -17,6 +17,7 @@ import sqlalchemy
 
 from pia_shared.textnorm import normalize_name
 from pia_worker.ai.provider import NIMProvider, ProviderError
+from pia_worker.settings import get_settings
 
 _KEYWORD_TERMS_MIN_LEN = 3
 
@@ -112,7 +113,7 @@ def retrieve_context(
 ) -> dict:
     """Full retrieval for one question: message matches (vector + keyword,
     deduplicated by id) plus the structured facts block."""
-    keyword = keyword_matches(conn, question)
+    keyword = keyword_matches(conn, question, limit=get_settings().ask_retrieve_k)
     vector, vector_error = vector_matches(conn, question, provider)
     seen: set[str] = set()
     matches: list[dict] = []

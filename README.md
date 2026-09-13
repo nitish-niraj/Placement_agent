@@ -99,6 +99,24 @@ the LLM only phrases the answer and its failure path returns raw evidence):
 curl -X POST http://localhost:8000/api/v1/ask   -H "Authorization: Bearer $DASHBOARD_TOKEN"   -H "Content-Type: application/json"   -d '{"question": "what is the TECHADEMY package and role?"}'
 ```
 
-Also available as the "Ask PIA" screen in the dashboard. Embeddings refresh
+Also available as the "Ask PIA" screen in the dashboard. The answer rides the
+**DEC-010 ladder** (NIM structured → OpenRouter → Groq → deterministic stored
+evidence); each result carries a `source` field naming the rung that answered
+(`nim` / `openrouter` / `groq` / `deterministic`). Simple ordering questions
+("which was the latest company I was eligible for?") are answered from stored
+records by `detected_at` even when every LLM rung is down. Embeddings refresh
 hourly with the maintenance sweep; ADR-003 applies — answers are informational
 and never mutate eligibility/events state.
+
+## Ask PIA on Telegram
+
+The `telegram-ask` compose service long-polls the bot (no inbound port): any
+text message from **`TELEGRAM_CHAT_ID` only** (fail-closed for every other
+chat) is answered by the same `ask_question` ladder, with confidence, rung
+tag, and up to 3 cited sources. `/start` shows usage. Offset is acked through
+Redis so restarts don't re-answer. Disable with `TELEGRAM_ASK_ENABLED=false`.
+
+```bash
+docker compose -f infrastructure/docker-compose.yml up -d --build telegram-ask
+docker logs pia-telegram-ask-1 -f        # watch it answer
+```

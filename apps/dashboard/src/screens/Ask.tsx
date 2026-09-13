@@ -10,6 +10,8 @@ interface AskResult {
   says_unavailable: boolean;
   confidence: number;
   fallback: boolean;
+  /** Which DEC-010 rung answered: nim | openrouter | groq | deterministic. */
+  source?: string;
 }
 
 export function Ask() {
@@ -58,6 +60,8 @@ export function Ask() {
             <p className="muted">The stored data doesn't cover this yet.</p>}
           {result.fallback &&
             <p className="muted">Language model unavailable — deterministic evidence below.</p>}
+          {(result.source === "openrouter" || result.source === "groq") &&
+            <p className="muted">answered via {result.source}</p>}
           <p className="muted">confidence {Math.round(result.confidence * 100)}%</p>
           {result.citations.length > 0 && (
             <>

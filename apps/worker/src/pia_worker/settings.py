@@ -77,6 +77,8 @@ class Settings(BaseSettings):
     # P10 notifications (DEC-002: Telegram primary channel)
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    # Ask PIA over Telegram: long-polling bridge (owner chat only, fail-closed).
+    telegram_ask_enabled: bool = True
     digest_hour: int = 20  # 20:30 Asia/Kolkata default (TRD §8)
     digest_minute: int = 30
     notify_send_attempts: int = 3  # RQ retries before PENDING_DELIVERY
