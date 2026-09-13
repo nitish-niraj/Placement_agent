@@ -16,37 +16,18 @@ only path to real-world effect, behind its own ADR (SEC-005;
 ACTION_AUTOMATION_ENABLED stays false)."""
 
 import json
-from urllib.parse import quote
 
 import sqlalchemy
 import structlog
 
 from pia_shared.enums import ActionStatus
 from pia_shared.states import assert_valid_transition
+from pia_worker.db import engine_for_current_host as _engine_for_current_host
 
 logger = structlog.get_logger()
 
 _PROPOSABLE_TYPES = ("FORM", "KYC")
 _RETRYABLE_STATES = ("FAILED", "EXPIRED")  # only these may be re-proposed
-
-
-def _database_url() -> str:
-    """Host-run callers (the Teams listener) have no DATABASE_URL in .env —
-    assemble it from the POSTGRES_* variables; compose maps 5432 to localhost.
-    In-container callers get DATABASE_URL from compose and use it directly."""
-    import os
-
-    url = os.environ.get("DATABASE_URL")
-    if url:
-        return url
-    user = quote(os.environ.get("POSTGRES_USER", "pia"))
-    password = quote(os.environ.get("POSTGRES_PASSWORD", "pia"))
-    db = os.environ.get("POSTGRES_DB", "pia")
-    return f"postgresql+psycopg://{user}:{password}@localhost:5432/{db}"
-
-
-def _engine_for_current_host() -> sqlalchemy.Engine:
-    return sqlalchemy.create_engine(_database_url())
 
 
 def _propose(target: str, payload: dict) -> str:

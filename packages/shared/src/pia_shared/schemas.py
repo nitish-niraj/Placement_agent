@@ -141,6 +141,20 @@ class FormFieldPlan(BaseModel):
     mappings: list[FormFieldMapping] = Field(default_factory=list)
 
 
+class AgentDecision(BaseModel):
+    """ADR-011 Stage 1: one ReAct step. The model either calls a read-only
+    tool or produces the final answer — it never mutates state (SEC-005)."""
+
+    # thought is optional: the small hosted model sometimes omits it, and the
+    # step is still fully determined by tool/final_answer (live 2026-09-13).
+    thought: str = ""
+    tool: str | None = None
+    args: dict[str, str] = Field(default_factory=dict)
+    final_answer: str | None = None
+    citations: list[AnswerCitation] = Field(default_factory=list)
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
 class MeetingSummary(BaseModel):
     """P12+ Teams-listener output (Type-1 informational KYC, DEC-008 amendment).
     Composed ONLY from the live captions/chat transcript the listener captured;

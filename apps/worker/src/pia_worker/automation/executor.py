@@ -27,7 +27,7 @@ from pia_shared.crypto import decrypt
 from pia_shared.enums import ActionStatus
 from pia_shared.states import assert_valid_transition
 from pia_worker.automation import fields, gform
-from pia_worker.jobs.propose_actions import _engine_for_current_host
+from pia_worker.db import engine_for_current_host as _engine_for_current_host
 from pia_worker.settings import get_settings
 from pia_worker.teams.listener import _telegram_send
 

@@ -10,12 +10,17 @@ interface AskResult {
   says_unavailable: boolean;
   confidence: number;
   fallback: boolean;
-  /** Which DEC-010 rung answered: nim | openrouter | groq | deterministic. */
+  /** Which rung answered: nim | openrouter | groq | deterministic | agent | p12_fallback. */
   source?: string;
+  /** ADR-011 Stage 1: per-step reasoning trace (agent runs only). */
+  steps?: { step: number; thought: string; tool: string | null;
+            args: Record<string, string>; observation_chars?: number }[];
+  agent_degraded?: boolean;
 }
 
 export function Ask() {
   const [question, setQuestion] = useState("");
+  const [deep, setDeep] = useState(false);
   const [result, setResult] = useState<AskResult | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -26,7 +31,7 @@ export function Ask() {
     setError(null);
     setResult(null);
     try {
-      setResult(await api<AskResult>("/ask", {
+      setResult(await api<AskResult>(deep ? "/agent/ask" : "/ask", {
         method: "POST",
         body: JSON.stringify({ question: question.trim() }),
       }));
@@ -49,6 +54,11 @@ export function Ask() {
         />
         <button onClick={ask} disabled={busy || question.trim().length < 3}>Ask</button>
       </div>
+      <label className="muted" style={{ display: "flex", gap: 6, alignItems: "center" }}>
+        <input type="checkbox" checked={deep}
+               onChange={(e) => setDeep(e.target.checked)} disabled={busy} />
+        🧠 Deep (multi-step agent — slower, shows its reasoning trace)
+      </label>
 
       {busy && <Loading />}
       {error && <p className="error-note">{error}</p>}
@@ -62,6 +72,20 @@ export function Ask() {
             <p className="muted">Language model unavailable — deterministic evidence below.</p>}
           {(result.source === "openrouter" || result.source === "groq") &&
             <p className="muted">answered via {result.source}</p>}
+          {result.source === "p12_fallback" &&
+            <p className="muted">agent degraded to the single-shot ladder</p>}
+          {result.steps && result.steps.length > 0 && (
+            <details>
+              <summary className="muted">reasoning trace ({result.steps.length} step{result.steps.length > 1 ? "s" : ""})</summary>
+              {result.steps.map((s) => (
+                <p key={s.step} className="muted">
+                  <strong>[{s.step}]</strong> {s.tool
+                    ? <>🛠 {s.tool}({JSON.stringify(s.args)})</>
+                    : "💡 final answer"} — {s.thought}
+                </p>
+              ))}
+            </details>
+          )}
           <p className="muted">confidence {Math.round(result.confidence * 100)}%</p>
           {result.citations.length > 0 && (
             <>

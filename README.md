@@ -99,6 +99,13 @@ the LLM only phrases the answer and its failure path returns raw evidence):
 curl -X POST http://localhost:8000/api/v1/ask   -H "Authorization: Bearer $DASHBOARD_TOKEN"   -H "Content-Type: application/json"   -d '{"question": "what is the TECHADEMY package and role?"}'
 ```
 
+The dashboard Ask screen also has a 🧠 **Deep (multi-step agent)** toggle —
+ADR-011 Stage 1: a bounded ReAct loop (max 6 steps) over read-only tools
+(search messages, eligibility, events, deadlines, company timeline, profile);
+answers restate tool results with citations, the reasoning trace is shown and
+stored in `agent_traces`, and any LLM failure degrades to the single-shot
+ladder below.
+
 Also available as the "Ask PIA" screen in the dashboard. The answer rides the
 **DEC-010 ladder** (NIM structured → OpenRouter → Groq → deterministic stored
 evidence); each result carries a `source` field naming the rung that answered

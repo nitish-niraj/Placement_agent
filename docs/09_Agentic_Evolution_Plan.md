@@ -63,7 +63,9 @@ flowchart TD
 
 ## 4. Stages
 
-### Stage 1 — Tool-using answer agent (read-only) — APPROVED
+### Stage 1 — Tool-using answer agent (read-only) — APPROVED, **BUILT 2026-09-13**
+
+**Built as specified:** `pia_worker/agent/tools.py` (read-only registry: search_messages / get_eligibility / get_events / get_deadlines / get_company_timeline / get_profile / get_document, size-capped), `pia_worker/agent/loop.py` (bounded ReAct, `AGENT_MAX_STEPS` default 6, schema-validated `AgentDecision` steps — the established structured-output pattern; NIM function-calling was deliberately NOT needed). Degradation ladder: agent loop → P12 single-shot (`ask_question`, own ladder) → raw evidence. Traces persist to `agent_traces` (migration 20260913_0001, best-effort). API `POST /api/v1/agent/ask`; Ask screen has a 🧠 Deep toggle rendering the reasoning trace. Stages 2–4 below still need owner go-ahead.
 
 - `pia_worker/agent/tools.py`: registry of read-only tools, each wrapping
   existing deterministic code:

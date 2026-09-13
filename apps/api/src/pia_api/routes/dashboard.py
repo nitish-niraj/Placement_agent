@@ -339,6 +339,16 @@ def ask(payload: AskRequest) -> dict:
     return ask_question(payload.question.strip())
 
 
+@router.post("/agent/ask")
+def agent_ask(payload: AskRequest) -> dict:
+    """ADR-011 Stage 1: the bounded tool-using agent — multi-step answers
+    with a reasoning trace. Read-only tools only (ADR-003/SEC-005); every
+    failure degrades to the P12 single-shot ladder (never an error)."""
+    from pia_worker.agent.loop import ask_agent
+
+    return ask_agent(payload.question.strip())
+
+
 @router.get("/metrics")
 def metrics() -> dict:
     """Operational counters (TRD §10.2, Redis-backed MVP form)."""
