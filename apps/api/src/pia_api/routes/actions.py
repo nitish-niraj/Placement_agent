@@ -159,19 +159,30 @@ def approve_action(action_id: str) -> dict:
     (which still honors FORM_SUBMIT_DRY_RUN); with it off, approval is
     terminal and recorded for the executor to consume later."""
     result = _decide(action_id, ActionStatus.APPROVED)
-    if result.get("type") == "form_draft":
-        from pia_api.jobs import enqueue_form_submit
-        from pia_api.settings import get_settings
+    from pia_api.settings import get_settings
 
-        if get_settings().form_automation_enabled:
-            try:
-                enqueue_form_submit(action_id)
-            except Exception as exc:  # noqa: BLE001 — approval must not fail
-                import structlog
+    # Stage 3 (ADR-012/013): an approval hands the draft to its executor —
+    # the form robot for form_draft, the proposal executors for reviewer
+    # types — but only when the per-capability switch is on.
+    executables = {"deadline_nudge", "kyc_reminder", "follow_up",
+                   "verify_field", "data_quality"}
+    try:
+        is_form = result.get("type") == "form_draft"
+        is_proposal = result.get("type") in executables
+        if is_form and get_settings().form_automation_enabled:
+            from pia_api.jobs import enqueue_form_submit
 
-                structlog.get_logger().error(
-                    "form_submit_enqueue_failed", action_id=action_id,
-                    error=str(exc)[:120])
+            enqueue_form_submit(action_id)
+        elif is_proposal and get_settings().stage3_executors_enabled:
+            from pia_api.jobs import enqueue_proposal_executor
+
+            enqueue_proposal_executor(action_id)
+    except Exception as exc:  # noqa: BLE001 — approval itself must not fail
+        import structlog
+
+        structlog.get_logger().error(
+            "executor_enqueue_failed", action_id=action_id,
+            type=result.get("type"), error=str(exc)[:120])
     return result
 
 

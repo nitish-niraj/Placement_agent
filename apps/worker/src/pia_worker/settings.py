@@ -59,6 +59,9 @@ class Settings(BaseSettings):
     ask_retrieve_k: int = 8  # P12 conversational search context size
     agent_max_steps: int = 6  # ADR-011 Stage 1 bounded ReAct loop
     reviewer_enabled: bool = True  # ADR-011 Stage 2 daily reviewer
+    # ADR-013 Stage 3: executors for approved proposals (telegram note /
+    # event correction / re-parse). Approval-gated by design.
+    stage3_executors_enabled: bool = False
 
     # Summary fallback chain (owner decisions 2026-09-12/13, DEC-010):
     # NIM structured -> OpenRouter -> Groq -> raw transcript. All keys live

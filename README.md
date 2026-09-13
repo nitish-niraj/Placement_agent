@@ -110,8 +110,10 @@ ladder below.
 bounded agent pass reviews your deadlines, eligibility, and events and files
 up to 3 evidence-backed proposals on the Approvals screen (types: deadline
 nudge, verify-field, data-quality, KYC reminder, follow-up), with a Telegram
-summary. It proposes, never acts — approve or reject like any draft
-(`REVIEWER_ENABLED=false` turns it off).
+summary. It proposes, never acts on its own — approving a proposal hands it to a
+deterministic Stage 3 executor (Telegram reminder card, approved event-field
+correction, or a deterministic re-parse — ADR-013,
+`STAGE3_EXECUTORS_ENABLED=false` turns them off). Every run is audited.
 
 Also available as the "Ask PIA" screen in the dashboard. The answer rides the
 **DEC-010 ladder** (NIM structured → OpenRouter → Groq → deterministic stored

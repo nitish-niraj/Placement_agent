@@ -94,7 +94,9 @@ executors (Stage 3) are the ONLY path to real-world effect. Examples:
 deadline-vs-inactivity proposals, NA-field verification proposals, KYC session
 reminders (DEC-008: reminders allowed, automation never).
 
-### Stage 3 — Approved-action executors — needs owner go-ahead
+### Stage 3 — Approved-action executors — owner go-ahead given, **BUILT 2026-09-13 (ADR-013)**
+
+**Built as specified:** `pia_worker/executors/proposal_executors.py` — deterministic executors behind approved proposals: deadline_nudge/kyc_reminder/follow_up -> Telegram reminder card; verify_field -> event field correction (allowlist + before/after audit); data_quality -> idempotency-key clear + deterministic re-parse re-enqueue. The agent prepared/sequenced (Stage 2 proposals); executors are fixed code; every run walks APPROVED -> EXECUTING -> SUCCEEDED | FAILED, audited. Per-capability switch `STAGE3_EXECUTORS_ENABLED` (this ADR). The Approvals screen states exactly what approving will do, per type. Stage 4 still needs owner go-ahead.
 
 Deterministic executors behind approved proposals (Telegram follow-up, create
 reminder, re-run parse, event field correction). Agent prepares/sequences;

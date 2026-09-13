@@ -17,7 +17,7 @@ ENDPOINTS = [
     ("get", "/api/v1/audit"), ("get", "/api/v1/metrics"),
     ("get", "/api/v1/documents"), ("get", "/api/v1/profile"),
     ("get", "/api/v1/actions"), ("post", "/api/v1/ask"),
-    ("post", "/api/v1/agent/ask"),
+    ("get", "/api/v1/agent/traces"), ("post", "/api/v1/agent/ask"),
     ("post", "/api/v1/actions/00000000-0000-0000-0000-000000000001/approve"),
     ("post", "/api/v1/actions/00000000-0000-0000-0000-000000000001/reject"),
     ("patch", "/api/v1/groups/00000000-0000-0000-0000-000000000001"),

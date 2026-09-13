@@ -18,7 +18,9 @@ interface ActionRow {
   updated_at: string;
   event: { id: string; title: string | null; company: string | null } | null;
   payload: { presenters?: string[]; company?: string | null; source?: string;
-             reason?: string; proposal_type?: string } | null;
+             reason?: string; proposal_type?: string;
+             correction?: { event_id?: string; field?: string; value?: string };
+             reparse_message_id?: string } | null;
   prefill: Record<string, string | number | null> | null;
 }
 
@@ -32,6 +34,31 @@ const PREFILL_LABELS: Record<string, string> = {
   branch: "Branch", batch: "Batch", cgpa: "CGPA",
   tenth_percent: "10th %", twelfth_percent: "12th %", backlog_count: "Backlogs",
 };
+
+/** Stage 3 (ADR-013): what the executor will do the moment you approve. */
+function willDo(a: ActionRow): string {
+  const correction = a.payload?.correction as
+    | { event_id?: string; field?: string; value?: string }
+    | undefined;
+  switch (a.type) {
+    case "deadline_nudge":
+    case "kyc_reminder":
+    case "follow_up":
+      return "send you a Telegram reminder card now";
+    case "verify_field":
+      return correction
+        ? `set "${correction.field}" = "${correction.value}" on event ${(correction.event_id ?? "").slice(0, 8)}`
+        : "apply the field correction";
+    case "data_quality":
+      return `re-run the event parser on message ${(a.payload?.reparse_message_id ?? "").slice(0, 8)}`;
+    case "form_draft":
+      return a.payload && (a.payload as { source?: string }).source === "teams_meeting_chat"
+        ? "submit this form (feedback form)"
+        : "submit this form after your approval";
+    default:
+      return "run the approved executor";
+  }
+}
 
 function PrefillDetails({ prefill }: { prefill: Record<string, string | number | null> }) {
   return (
@@ -91,6 +118,7 @@ export function Approvals() {
                 <><br /><span className="muted">👤 Teacher/presenter: {a.payload.presenters.join(", ")}</span></>
               ) : null}
               {a.event?.title ? <><br /><span className="muted">{a.event.title}</span></> : null}
+              <><br /><span className="muted">✓ approving will: {willDo(a)}</span></>
             </span>,
             a.prefill ? <PrefillDetails key="p" prefill={a.prefill} /> : "—",
             <span key="a" className="actions">
@@ -118,8 +146,9 @@ export function Approvals() {
         />
         {decided.length === 0 && <p className="muted">No decided drafts yet.</p>}
         <p className="muted">
-          Approved drafts wait for the submission executor (P14) — approval is
-          recorded and audited, nothing is sent yet.
+          Approving hands the draft to its executor — forms submit via the
+          Stage 3 robot, reviewer proposals run their approved action. Every
+          run is audited.
         </p>
       </Card>
     </>

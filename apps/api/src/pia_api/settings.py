@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     # P14.1 per-capability switch (ADR-012): approve enqueues the form
     # submit job only when this is on (FORM_SUBMIT_DRY_RUN still applies).
     form_automation_enabled: bool = False
+    stage3_executors_enabled: bool = False  # ADR-013 per-capability switch
 
     @model_validator(mode="after")
     def enforce_action_kill_switch(self) -> "Settings":

@@ -85,6 +85,11 @@ Where the two source docs conflict, the **Master Requirements doc wins**, except
 - **Rationale:** The owner requested auto-submit after per-draft approval with graceful handling of new columns. Approval-gated execution satisfies ADR-008/SEC-004/SEC-005 with a per-capability switch instead of flipping the global kill switch.
 - **Consequence:** `pia_worker/automation/` package (fields/gform/executor); `routes/actions.py` approve enqueues the job when enabled; the worker image gains headless chromium; both flags live in settings/env.example; every EXECUTING/SUCCEEDED/FAILED hop is audited; the first real form tunes the DOM selectors (dry-run makes that safe).
 
+### ADR-013 — Stage 3 executors for approved reviewer proposals (2026-09-13)
+- **Decision:** Owner go-ahead given (2026-09-13) for Stage 3 executors over the reviewer's proposal types, gated by `STAGE3_EXECUTORS_ENABLED` (per-capability switch, ADR-008/SEC-004/SEC-005 posture): **deadline_nudge / kyc_reminder / follow_up** -> a Telegram reminder card sent at approval time; **verify_field** -> the approved field correction written onto the event (`jsonb_set`, field allowlist: designation / salary_package / job_location / eligibility_note, before->after audited); **data_quality** -> the message's event idempotency key cleared and the deterministic event extractor re-enqueued. Every run walks APPROVED -> EXECUTING -> SUCCEEDED | FAILED on the §10.4 machine with the reason recorded.
+- **Rationale:** The reviewer proposes (Stage 2); approval should make the trivial actions happen without more manual steps. Executors are fixed code, never LLM-driven; the LLM's only role was the proposal, which the owner saw and approved with its exact work fields rendered on the dashboard.
+- **Consequence:** `pia_worker/executors/` package; approve endpoint enqueues the right executor per type; reviewer `propose_action` gains structured work fields (event_id/field/value, message_id) validated at propose time; DEC-008 boundary untouched (a kyc_reminder is a Telegram message, never session automation).
+
 ---
 
 ## 3. Architecture Summary

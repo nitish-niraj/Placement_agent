@@ -42,3 +42,13 @@ def enqueue_form_submit(action_id: str) -> None:
         "pia_worker.automation.executor.submit_form_action",
         action_id,
     )
+
+
+def enqueue_proposal_executor(action_id: str) -> None:
+    """ADR-013 Stage 3: the owner approved a reviewer proposal — hand it to
+    the executor. No RQ retry: failures transition the action to FAILED
+    in-job (with Telegram fallback); blind retries would double-send notes."""
+    _queue().enqueue(
+        "pia_worker.executors.proposal_executors.run_proposal_executor",
+        action_id,
+    )

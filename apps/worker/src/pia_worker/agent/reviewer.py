@@ -58,8 +58,17 @@ propose_action arguments:
 - target: what it is about (an event id, a company name, or a URL)
 - title: short headline for the dashboard
 - reason: the evidence-backed explanation shown to the owner
+Stage 3 work fields (the executor runs them ONLY after the owner approves):
+- verify_field: also pass event_id, field (one of designation, salary_package,
+  job_location, eligibility_note) and value (the corrected value you saw
+  evidence for in a tool result — never invented).
+- data_quality: also pass message_id (the stored message to re-parse).
 Available tools:
 {tool_docs}"""
+
+# Fields an approved verify_field executor may rewrite on an event.
+CORRECTABLE_FIELDS = ("designation", "salary_package", "job_location",
+                      "eligibility_note")
 
 
 def _make_propose_handler(proposed: list[dict]):
@@ -69,19 +78,33 @@ def _make_propose_handler(proposed: list[dict]):
     Even a hallucinated proposal can only ever become a dashboard row."""
 
     def propose_action(type: str = "", target: str = "", title: str = "",
-                       reason: str = "") -> dict:  # noqa: A002 — LLM-facing name
+                       reason: str = "", event_id: str = "", field: str = "",
+                       value: str = "", message_id: str = ""
+                       ) -> dict:  # noqa: A002 — LLM-facing name
         if type not in REVIEWER_ACTION_TYPES:
             return {"error": f"type must be one of {sorted(REVIEWER_ACTION_TYPES)}"}
         if not target.strip() or not reason.strip():
             return {"error": "target and reason are required"}
         if len(proposed) >= _MAX_PROPOSALS:
             return {"error": f"proposal limit ({_MAX_PROPOSALS}) reached for this run"}
-        payload = {
+        payload: dict[str, object] = {
             "source": "stage2_reviewer",
             "proposal_type": type,
             "title": title.strip()[:200] or f"{type}: {target.strip()[:80]}",
             "reason": reason.strip()[:500],
         }
+        if type == "verify_field":  # Stage 3: what the correction executor will do
+            if not (event_id.strip() and field.strip() and value.strip()):
+                return {"error": "verify_field needs event_id, field and value"}
+            if field.strip() not in CORRECTABLE_FIELDS:
+                return {"error": f"field must be one of {list(CORRECTABLE_FIELDS)}"}
+            payload["correction"] = {"event_id": event_id.strip(),
+                                     "field": field.strip(),
+                                     "value": value.strip()[:200]}
+        if type == "data_quality":  # Stage 3: the re-parse executor's input
+            if not message_id.strip():
+                return {"error": "data_quality needs message_id"}
+            payload["reparse_message_id"] = message_id.strip()
         outcome = _propose(target.strip(), payload, action_type=type)
         proposed.append({"type": type, "target": target.strip()[:120],
                          "title": payload["title"], "outcome": outcome})

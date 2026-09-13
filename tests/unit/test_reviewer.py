@@ -135,3 +135,56 @@ class TestDailyReview:
         assert result["status"] == "ok"
         assert result["proposals"] == []
         assert any("0 proposal(s)" in str(kw.get("text", "")) for kw in sent)
+
+
+class TestStage3WorkFields:
+    """Stage 3: verify_field / data_quality proposals carry machine-readable
+    work for their executors; the handler validates them at propose time."""
+
+    def _handler(self, monkeypatch: pytest.MonkeyPatch,
+                 proposes: list[dict]):
+        monkeypatch.setattr(rev, "get_settings", lambda: _settings())
+        return rev._make_propose_handler([]), proposes
+
+    def test_verify_field_carries_correction(
+        self, monkeypatch: pytest.MonkeyPatch, proposes: list[dict]
+    ) -> None:
+        handler, _ = self._handler(monkeypatch, proposes)
+        out = handler(type="verify_field", target="event:abc",
+                      title="Fix designation", reason="tool result showed NA",
+                      event_id="00000000-0000-0000-0000-00000000000b",
+                      field="designation", value="Data Engineer")
+        assert out["outcome"] == "proposed"
+        assert proposes[0]["payload"]["correction"] == {
+            "event_id": "00000000-0000-0000-0000-00000000000b",
+            "field": "designation", "value": "Data Engineer"}
+
+    def test_verify_field_without_work_rejected(
+        self, monkeypatch: pytest.MonkeyPatch, proposes: list[dict]
+    ) -> None:
+        handler, _ = self._handler(monkeypatch, proposes)
+        assert "error" in handler(type="verify_field", target="event:abc",
+                                  reason="r")
+        assert "error" in handler(type="verify_field", target="event:abc",
+                                  reason="r", event_id="e", field="cgpa",
+                                  value="4.0")  # field not correctable
+        assert proposes == []
+
+    def test_data_quality_carries_message_id(
+        self, monkeypatch: pytest.MonkeyPatch, proposes: list[dict]
+    ) -> None:
+        handler, _ = self._handler(monkeypatch, proposes)
+        out = handler(type="data_quality", target="msg:xyz",
+                      reason="duplicate event with different venue",
+                      message_id="00000000-0000-0000-0000-00000000000c")
+        assert out["outcome"] == "proposed"
+        assert proposes[0]["payload"]["reparse_message_id"] == \
+            "00000000-0000-0000-0000-00000000000c"
+
+    def test_data_quality_without_message_rejected(
+        self, monkeypatch: pytest.MonkeyPatch, proposes: list[dict]
+    ) -> None:
+        handler, _ = self._handler(monkeypatch, proposes)
+        assert "error" in handler(type="data_quality", target="m",
+                                  reason="r")
+        assert proposes == []
