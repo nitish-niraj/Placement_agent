@@ -42,6 +42,8 @@ tr:hover td { background: #fafbfc; }
 .badge-NOT_FOUND, .badge-SUPERSEDED, .badge-EXPIRED, .badge-MUTED { color: var(--muted); }
 .badge-MEDIUM { background: #faf0dc; color: var(--amber); }
 .badge-LOW { background: #eef1f4; }
+.badge-WAITING_APPROVAL, .badge-PROPOSED { background: #faf0dc; color: var(--amber); }
+.badge-APPROVED, .badge-EXECUTING, .badge-SUCCEEDED { background: var(--accent-soft); color: var(--accent); }
 
 button { border: 1px solid var(--accent); background: var(--accent); color: #fff;
          border-radius: 6px; padding: 5px 10px; cursor: pointer; font-size: 12px; }

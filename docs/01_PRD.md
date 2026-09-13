@@ -90,7 +90,7 @@ Data Nitish prepares upfront (from the leaner source doc §6):
 - **Using an LLM as the sole source of truth** for candidate identity or eligibility (ADR-004/005).
 - **Building a general-purpose autonomous browsing agent** before the core information pipeline is reliable.
 - **Outbound WhatsApp activity of any kind** — no sends, replies, or reactions via the connector (DEC-003, ban-risk mitigation).
-- **KYC attendance/submission automation — permanently excluded from the product**, not just MVP: a KYC session exists to verify identity, and automating it would misrepresent Nitish's identity to companies/college (DEC-008). KYC *sessions are still detected and reminded* as events (FR-EVT-001).
+- **KYC attendance automation — permanently excluded from the product**: a post-shortlist KYC session exists to verify identity, and automating attendance would misrepresent Nitish's identity to companies/college (DEC-008). KYC *sessions are still detected and reminded* as events (FR-EVT-001). **(Amendment 2026-09-13)** KYC *form/document submission* of the owner's own data IS in scope behind the approval workflow: detect → pre-fill from profile → explicit per-draft approval → submission by the P14 executor (DEC-008 amendment; ADR-008).
 - **P12–P14 features in MVP**: conversational search (P12), action preparation (P13), controlled automation (P14) — future scope only (DEC-004).
 
 ---

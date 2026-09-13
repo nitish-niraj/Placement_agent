@@ -83,6 +83,10 @@ def priority_for_event(ctx: EventContext, now: datetime | None = None) -> Decisi
             and ctx.deadline_at > now_ist:
         return Decision(NotificationPriority.HIGH, "immediate",
                         "Registration window announced (deadline more than 24h away)")
+    if ctx.event_type is EventType.FORM:
+        return Decision(NotificationPriority.HIGH, "immediate",
+                        "Form announced — fill and submit (P13 detection; "
+                        "a draft awaits your approval on the dashboard)")
     if ctx.event_type is EventType.EXAM:
         return Decision(NotificationPriority.MEDIUM, "digest",
                         "Academic exam announcement — surfaced without company "

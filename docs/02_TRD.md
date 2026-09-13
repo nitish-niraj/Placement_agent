@@ -66,7 +66,7 @@ flowchart TD
 | Eligibility Engine | Evaluate candidate lists/rules against profile; evidence-backed match results | General message summarization |
 | Memory/Event Engine | Persist facts, events, relationships, lifecycle states, deltas | Direct WhatsApp transport |
 | Notification Engine | Decide what/when/how to notify; suppress duplicates; delivery history | Reinterpreting raw files |
-| Action Engine (**future, P13/P14**) | Prepare/execute approved external actions | Silent or irreversible execution without authorization (SEC-005); **KYC automation — permanently excluded (DEC-008)** |
+| Action Engine (**P13 proposal done; P14 executor**) | Prepare/execute approved external actions | Silent or irreversible execution without authorization (SEC-005); **KYC session attendance — never automated (DEC-008); form submission only via the approval-gated P14 executor (DEC-008 Amendment 2026-09-13)** |
 
 ---
 
@@ -302,7 +302,7 @@ relevance score (FR-NOT-001)
 | SEC-002 | Sensitive profile fields & documents encrypted at rest, access-controlled | AES-256-GCM app-level encryption for sensitive profile columns (key from env, rotation-ready); documents in MinIO with server-side encryption; single-user bearer token on dashboard API |
 | SEC-003 | Webhook authenticated + rate-limited | HMAC/shared-secret signature verification on `/webhooks/evolution`; per-source rate limit (Redis token bucket); replay protection via idempotency + timestamp window |
 | SEC-004 | Every external action permission-checked and audited | Action Engine (future) evaluates a capability profile; every action row + transition written to `audit_logs`; MVP: no action execution path exists |
-| SEC-005 | Autonomous irreversible actions disabled by default | `ACTION_AUTOMATION_ENABLED=false` hardcoded default; `/actions/{id}/approve` returns 501 in MVP; config parse refuses `true` in MVP builds |
+| SEC-005 | Autonomous irreversible actions disabled by default | `ACTION_AUTOMATION_ENABLED=false` hardcoded default; P13 ships approve/reject + audit with NO execution path (APPROVED is terminal until the P14 executor ADR); config parse refuses `true` in MVP builds |
 | SEC-006 | Processing minimized to enabled groups | Ingestion drops non-allowlisted group events **before** persistence of derived data (only raw audit row with retention); pipeline tests assert no AI call for unselected groups |
 | SEC-007 | Retention policy for raw media, messages, model artifacts | `retention_expires_at` on raw payloads/media/AI artifacts; daily retention worker hard-deletes expired rows + MinIO objects; periods from `RAW_MESSAGE_RETENTION_DAYS` / `DOCUMENT_RETENTION_DAYS` |
 | SEC-008 | Configurable model providers | `LLM_PROVIDER`/`LLM_MODEL`/base URL configurable; provider abstraction (§4.1) enables privacy-appropriate (incl. self-hosted OpenAI-compatible) deployment |

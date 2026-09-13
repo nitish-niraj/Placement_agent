@@ -27,6 +27,7 @@ from playwright.sync_api import sync_playwright
 
 from pia_shared.schemas import MeetingSummary
 from pia_worker.ai.provider import NIMProvider, ProviderError
+from pia_worker.events.rules import FORM_LINK_PATTERN
 from pia_worker.settings import get_settings
 from pia_worker.teams import is_teams_url
 
@@ -38,10 +39,7 @@ logger = structlog.get_logger()
 
 _STATE_FILE = Path(__file__).resolve().parents[5] / "infrastructure" / "teams_session.json"
 _TRANSCRIPT_DIR = Path(__file__).resolve().parents[5] / "transcripts"
-_FORM_LINK = (
-    "https?://(?:forms\\.(?:office|glide)\\.com|docs\\.google\\.com/forms)"
-    "[^\\s\"<>]*"
-)
+_FORM_LINK = FORM_LINK_PATTERN  # P13/F-029: one shared detector (events/rules)
 _FORM_RE = None  # compiled lazily inside watch loop
 _CHAT_SELECTORS = [
     "[role='list'] [data-tid='chat-pane-item']",  # best-effort; Teams DOM shifts
@@ -151,16 +149,28 @@ def _presenter_names(caption_text: str) -> list[str]:
 
 def _relay_form_link(link: str, presenters: tuple[str, ...] = ()) -> None:
     """Instant Telegram relay — the owner's primary ask (fills the form
-    himself), plus the teacher/presenter name if the session revealed one."""
+    himself), plus the teacher/presenter name if the session revealed one.
+    The same link also becomes an approval-gated draft on the dashboard
+    (P13/F-030, DEC-008 Amendment 2026-09-13) — best-effort: a DB hiccup
+    must never break the relay or the session."""
     who = (", ".join(presenters) if presenters
            else "not detected in captions/chat yet")
     text = (
         "📝 <b>KYC feedback form is up</b>\n"
         f"<a href='{link}'>Fill it now (manually — always yours)</a>\n"
         f"👤 Teacher/presenter: {who}\n"
+        "Also queued as a pre-filled draft — review it on the dashboard "
+        "(Approvals).\n"
         "The listener will leave the session shortly.")
     if _telegram_send(text=text):
         logger.info("form_link_relayed", link=link[:60], presenters=who)
+    try:
+        from pia_worker.jobs.propose_actions import propose_meeting_form_action
+
+        outcome = propose_meeting_form_action(link, presenters=presenters)
+        logger.info("form_draft_proposed", outcome=outcome, link=link[:60])
+    except Exception as exc:  # noqa: BLE001 — the relay already went out
+        logger.warning("form_draft_proposal_failed", error=str(exc)[:120])
 
 
 def _extract_chat_links(page) -> list[str]:

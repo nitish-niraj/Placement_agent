@@ -1,0 +1,177 @@
+"""P13/F-030 propose_form_action: pure flow over a scripted fake connection.
+
+Covers: proposal inserts PROPOSED and walks it to WAITING_APPROVAL (§10.4
+machine asserted), idempotency per form URL (non-terminal and decided drafts
+block re-proposal; FAILED may be retried), non-proposable types and link-less
+events skip. The payload must carry references only — no decrypted PII."""
+
+import contextlib
+import json
+
+import pytest
+
+from pia_worker.jobs import propose_actions as pa
+
+FORM_URL = "https://docs.google.com/forms/d/e/ABC123/viewform"
+
+
+class FakeResult:
+    def __init__(self, value=None, mapping=None):
+        self._value = value
+        self._mapping = mapping
+
+    def scalar(self):
+        return self._value
+
+    def mappings(self):
+        return self
+
+    def first(self):
+        return self._mapping
+
+
+class FakeConn:
+    def __init__(self, script):
+        self._script = script
+        self.executed: list[tuple[str, dict | None]] = []
+
+    def execute(self, sql, params=None):
+        text = str(sql)
+        self.executed.append((text, params))
+        return self._script(text, params)
+
+
+class FakeEngine:
+    def __init__(self, conn: FakeConn):
+        self._conn = conn
+
+    def connect(self):
+        return contextlib.nullcontext(self._conn)
+
+    def begin(self):
+        return contextlib.nullcontext(self._conn)
+
+
+def _script(existing_status: str | None, event_type: str = "FORM",
+            links: list[str] | None = None):
+    links = [FORM_URL] if links is None else links
+
+    def script(sql: str, _params: dict | None = None) -> FakeResult:
+        if "FROM events e" in sql:
+            return FakeResult(mapping={"type": event_type, "company": "SOFTLINK",
+                                       "links": links})
+        if "FROM users" in sql:
+            return FakeResult(value="user-uuid")
+        if "FROM actions WHERE target" in sql:
+            return FakeResult(value=existing_status)
+        if "INSERT INTO actions" in sql:
+            return FakeResult(value="action-uuid")
+        return FakeResult()  # UPDATE / audit_logs
+
+    return script
+
+
+class TestProposalFlow:
+    def _run(self, monkeypatch: pytest.MonkeyPatch, existing: str | None,
+             event_type: str = "FORM", links: list[str] | None = None) -> FakeConn:
+        conn = FakeConn(_script(existing, event_type, links))
+        monkeypatch.setattr(pa, "_engine_for_current_host",
+                            lambda: FakeEngine(conn))
+        return conn
+
+    def test_proposes_and_walks_to_waiting_approval(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        conn = self._run(monkeypatch, existing=None)
+        assert pa.propose_form_action("event-uuid") == "proposed"
+        updates = [sql for sql, _ in conn.executed if "UPDATE actions" in sql]
+        assert updates and "WAITING_APPROVAL" in updates[0]
+        audits = [p for sql, p in conn.executed if "audit_logs" in sql and p]
+        assert {a["action"] for a in audits} == {"action.propose",
+                                                 "action.await_approval"}
+
+    def test_payload_holds_references_only_no_pii(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        conn = self._run(monkeypatch, existing=None)
+        pa.propose_form_action("event-uuid")
+        inserts = [p for sql, p in conn.executed
+                   if "INSERT INTO actions" in sql and p]
+        payload = json.loads(inserts[0]["payload"])
+        assert payload["form_url"] == FORM_URL
+        assert payload["event_id"] == "event-uuid"
+        assert "prefill" not in payload
+        assert not any(key in payload for key in ("roll_number", "email", "cgpa"))
+
+    def test_idempotent_same_url_blocks_reproposal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        conn = self._run(monkeypatch, existing="WAITING_APPROVAL")
+        assert pa.propose_form_action("event-uuid") == "already_proposed"
+        assert not any("INSERT INTO actions" in sql for sql, _ in conn.executed)
+
+    def test_rejected_decision_stands_no_reproposal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._run(monkeypatch, existing="REJECTED")
+        assert pa.propose_form_action("event-uuid") == "already_proposed"
+
+    def test_failed_action_may_be_retried(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._run(monkeypatch, existing="FAILED")
+        assert pa.propose_form_action("event-uuid") == "proposed"
+
+    def test_non_proposable_type_skipped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._run(monkeypatch, existing=None, event_type="OA")
+        assert pa.propose_form_action("event-uuid") == "skipped_type"
+
+    def test_event_without_link_skipped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._run(monkeypatch, existing=None, links=[])
+        assert pa.propose_form_action("event-uuid") == "skipped_no_link"
+
+
+class TestMeetingProposal:
+    """Listener entry (P13): a form link relayed from the Teams meeting chat
+    becomes a draft carrying the caption-detected teacher/presenter names."""
+
+    def _run(self, monkeypatch: pytest.MonkeyPatch,
+             existing: str | None = None) -> FakeConn:
+        conn = FakeConn(_script(existing))
+        monkeypatch.setattr(pa, "_engine_for_current_host",
+                            lambda: FakeEngine(conn))
+        return conn
+
+    def test_proposes_with_presenters_in_payload(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        conn = self._run(monkeypatch)
+        outcome = pa.propose_meeting_form_action(
+            FORM_URL + "/", presenters=("Dr. Sharma", "Prof. Verma"))
+        assert outcome == "proposed"
+        inserts = [p for sql, p in conn.executed
+                   if "INSERT INTO actions" in sql and p]
+        payload = json.loads(inserts[0]["payload"])
+        assert payload["source"] == "teams_meeting_chat"
+        assert payload["presenters"] == ["Dr. Sharma", "Prof. Verma"]
+        assert inserts[0]["target"] == FORM_URL  # trailing slash trimmed
+
+    def test_no_presenters_is_fine(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        conn = self._run(monkeypatch)
+        assert pa.propose_meeting_form_action(FORM_URL) == "proposed"
+        inserts = [p for sql, p in conn.executed
+                   if "INSERT INTO actions" in sql and p]
+        assert json.loads(inserts[0]["payload"])["presenters"] == []
+
+    def test_blank_url_skipped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        conn = self._run(monkeypatch)
+        assert pa.propose_meeting_form_action("") == "skipped_no_link"
+        assert not any("INSERT INTO actions" in sql for sql, _ in conn.executed)
+
+    def test_idempotent_per_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._run(monkeypatch, existing="WAITING_APPROVAL")
+        assert pa.propose_meeting_form_action(FORM_URL) == "already_proposed"

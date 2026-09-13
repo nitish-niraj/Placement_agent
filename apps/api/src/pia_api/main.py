@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 
 from pia_api import __version__
 from pia_api.deps import require_dashboard_token
-from pia_api.routes import dashboard, documents, health, profile, webhooks
+from pia_api.routes import actions, dashboard, documents, health, profile, webhooks
 from pia_api.settings import get_settings
 
 
@@ -45,6 +45,7 @@ def create_app() -> FastAPI:
     # Protected surface — every dashboard/business route mounts behind the token.
     app.include_router(profile.router)
     app.include_router(documents.router)
+    app.include_router(actions.router)
     app.include_router(dashboard.router)
     protected = APIRoute("/api/v1/ping", endpoint=_ping, methods=["GET"], tags=["meta"],
                          dependencies=[Depends(require_dashboard_token)])

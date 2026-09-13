@@ -144,8 +144,8 @@ Format: task → acceptance criteria → traced requirements. Every task also ob
 | Feature | Phase | Note |
 |---|---|---|
 | F-028 Conversational search | P12 | Needs P0–P11 stable; source-backed answers only |
-| F-029 KYC/form detector | P13 | Detection/reminders only — **KYC automation permanently excluded (DEC-008)** |
-| F-030 Approval workflow | P13 | PROPOSED→…→SUCCEEDED machine already modeled in schema |
+| F-029 KYC/form detector | P13 | **Delivered 2026-09-13**: form links → FORM events + T-24/6/1h reminders (shared detector; Teams listener stays Telegram-only). Submission automation is approval-gated per the DEC-008 Amendment 2026-09-13 |
+| F-030 Approval workflow | P13 | **Delivered 2026-09-13**: actions list/approve/reject API + dashboard Approvals screen + form_draft proposals; machine enforced via `assert_valid_transition`, all transitions audited |
 | F-031 Browser/action executor | P14 | `ACTION_AUTOMATION_ENABLED=false` until a future ADR says otherwise |
 
 ---

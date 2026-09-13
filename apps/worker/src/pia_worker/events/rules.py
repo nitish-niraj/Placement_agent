@@ -90,6 +90,15 @@ def detect_event_type(text: str) -> EventType | None:
     return None
 
 
+def resolve_event_type(text: str) -> EventType | None:
+    """detect_event_type + the P13/F-029 fallback: a placement form link alone
+    (no matching keyword) is still a FORM event — the link is the signal."""
+    event_type = detect_event_type(text)
+    if event_type is not None:
+        return event_type
+    return EventType.FORM if extract_form_links(text) else None
+
+
 def detect_deadline_context(text: str) -> bool:
     # WhatsApp bold markers ("*5th September*") break label heuristics — strip.
     return bool(DEADLINE_CONTEXT.search((text or "").replace("*", " ")))
@@ -144,6 +153,25 @@ def extract_venue(text: str) -> str | None:
 
 def extract_links(text: str) -> list[str]:
     return list(dict.fromkeys(_URL.findall(text or "")))
+
+
+# --- P13/F-029: placement form links (Google Forms / Microsoft Forms / Glide) --
+# One detector, two consumers: the WhatsApp pipeline (form link => FORM event)
+# and the Teams listener (meeting-chat watcher relays them to Telegram).
+FORM_LINK_PATTERN = (
+    r"https?://(?:forms\.(?:office|glide)\.com|docs\.google\.com/forms)"
+    r"[^\s\"<>]*"
+)
+FORM_LINK_RE = re.compile(FORM_LINK_PATTERN, re.IGNORECASE)
+
+
+def extract_form_links(text: str) -> list[str]:
+    """Form links in first-occurrence order, deduplicated, prose punctuation
+    trimmed. Empty list = no form link."""
+    return list(dict.fromkeys(
+        match.group(0).rstrip(").,;")
+        for match in FORM_LINK_RE.finditer(_WS.sub(" ", text or ""))
+    ))
 
 
 # --- LPU drive-template labeled fields (role / package / location) --------------

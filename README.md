@@ -120,3 +120,14 @@ Redis so restarts don't re-answer. Disable with `TELEGRAM_ASK_ENABLED=false`.
 docker compose -f infrastructure/docker-compose.yml up -d --build telegram-ask
 docker logs pia-telegram-ask-1 -f        # watch it answer
 ```
+
+## Approvals (P13)
+
+Placement form requests become FORM events with reminders, and each one
+proposes a `form_draft` action pre-filled from your stored profile — shown on
+the dashboard **Approvals** screen. The Teams listener feeds the same
+pipeline: a form link dropped in the meeting chat (with the caption-detected
+teacher/presenter name) becomes a draft too. Nothing is ever submitted without your
+explicit per-draft approval (ADR-008); approving only records the decision
+(audited) until the P14 submission executor lands behind its own ADR. KYC
+*session attendance* remains always-manual (DEC-008).

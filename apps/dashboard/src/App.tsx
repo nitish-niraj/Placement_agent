@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { HashRouter, Link, NavLink, Route, Routes } from "react-router-dom";
 import { getToken, setToken, useApi, clearToken } from "./api";
+import { Approvals } from "./screens/Approvals";
 import { Companies, CompanyTimeline, Timeline } from "./screens/Companies";
 import { Documents, Eligibility, Inbox, Notifications } from "./screens/Lists";
 import { Audit, Profile, Settings } from "./screens/Profile";
@@ -39,10 +40,10 @@ function Login({ onDone }: { onDone: () => void }) {
 }
 
 const NAV = [
-  ["/", "Overview"], ["/ask", "Ask PIA"], ["/companies", "Companies"], ["/timeline", "Timeline"],
-  ["/inbox", "Inbox"], ["/documents", "Documents"], ["/notifications", "Notifications"],
-  ["/eligibility", "Eligibility"], ["/profile", "Profile"], ["/settings", "Settings"],
-  ["/audit", "Audit"],
+  ["/", "Overview"], ["/ask", "Ask PIA"], ["/approvals", "Approvals"], ["/companies", "Companies"],
+  ["/timeline", "Timeline"], ["/inbox", "Inbox"], ["/documents", "Documents"],
+  ["/notifications", "Notifications"], ["/eligibility", "Eligibility"], ["/profile", "Profile"],
+  ["/settings", "Settings"], ["/audit", "Audit"],
 ] as const;
 
 function Shell({ children }: { children: React.ReactNode }) {
@@ -87,6 +88,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<Overview />} />
           <Route path="/ask" element={<Ask />} />
+          <Route path="/approvals" element={<Approvals />} />
           <Route path="/companies" element={<Companies />} />
           <Route path="/companies/:id" element={<CompanyTimeline />} />
           <Route path="/timeline" element={<Timeline />} />

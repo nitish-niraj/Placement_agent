@@ -53,7 +53,7 @@ def extract_events(message_id: str) -> str:
         return "already"
 
     text = message["text"] or ""
-    event_type = rules.detect_event_type(text)
+    event_type = rules.resolve_event_type(text)
     if event_type is None:
         return "no_event"
 
@@ -146,6 +146,10 @@ def extract_events(message_id: str) -> str:
             Queue(DEFAULT_QUEUE, connection=Redis.from_url(settings.redis_url)).enqueue(
                 "pia_worker.jobs.notify.notify_event", event_id, outcome
             )
+            if event_type.value in ("FORM", "KYC"):  # P13/F-030: propose the draft
+                Queue(DEFAULT_QUEUE, connection=Redis.from_url(settings.redis_url)).enqueue(
+                    "pia_worker.jobs.propose_actions.propose_form_action", event_id
+                )
         except Exception as exc:  # noqa: BLE001 — chaining failure logged, retryable
             logger.warning("notify_enqueue_failed", event_id=event_id,
                            error=str(exc)[:120])

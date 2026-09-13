@@ -118,3 +118,40 @@ class TestDriveTemplateFields:
             "*Salary Package :-* CTC Rs. 4 LPA")
         assert fields["designation"] == "Business Development Executive"
         assert fields["salary_package"] == "CTC Rs. 4 LPA"
+
+
+class TestFormLinkDetection:
+    """P13/F-029: placement form links become FORM events."""
+
+    def test_google_form_detected_and_trimmed(self) -> None:
+        text = ("Please fill the form https://docs.google.com/forms/d/e/"
+                "1FAIpQLSf/viewform?usp=send_link.")
+        assert rules.extract_form_links(text) == [
+            "https://docs.google.com/forms/d/e/1FAIpQLSf/viewform?usp=send_link"]
+
+    def test_ms_forms_and_glide_detected(self) -> None:
+        text = ("MS form https://forms.office.com/r/abc123 and "
+                "glide https://forms.glide.com/d/e/xYz")
+        assert rules.extract_form_links(text) == [
+            "https://forms.office.com/r/abc123",
+            "https://forms.glide.com/d/e/xYz",
+        ]
+
+    def test_non_form_link_ignored(self) -> None:
+        assert rules.extract_form_links("register at https://example.com/x") == []
+
+    def test_deduplicated_in_first_seen_order(self) -> None:
+        url = "https://docs.google.com/forms/d/e/ABC/viewform"
+        assert rules.extract_form_links(f"fill {url}.\nagain {url},") == [url]
+
+    def test_resolve_event_type_keyword_wins(self) -> None:
+        text = "KYC session details https://docs.google.com/forms/d/e/1/viewform"
+        assert rules.resolve_event_type(text) is EventType.KYC
+
+    def test_resolve_event_type_bare_form_link_is_form_event(self) -> None:
+        text = ("Dear students, do this at the earliest. "
+                "https://docs.google.com/forms/d/e/2/viewform")
+        assert rules.resolve_event_type(text) is EventType.FORM
+
+    def test_resolve_event_type_none_without_signal(self) -> None:
+        assert rules.resolve_event_type("hello students, good morning") is None
