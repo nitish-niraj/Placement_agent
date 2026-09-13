@@ -129,6 +129,18 @@ class ConversationalAnswer(BaseModel):
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
+class FormFieldMapping(BaseModel):
+    """P14.1 form executor: the LLM may only ever CHOOSE which stored value
+    belongs in a question — never invent content (ADR-004)."""
+
+    question: str
+    value_key: str  # a catalog key, or "skip"
+
+
+class FormFieldPlan(BaseModel):
+    mappings: list[FormFieldMapping] = Field(default_factory=list)
+
+
 class MeetingSummary(BaseModel):
     """P12+ Teams-listener output (Type-1 informational KYC, DEC-008 amendment).
     Composed ONLY from the live captions/chat transcript the listener captured;

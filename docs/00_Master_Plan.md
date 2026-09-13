@@ -80,6 +80,11 @@ Where the two source docs conflict, the **Master Requirements doc wins**, except
 - **Rationale:** DEC-006 already mandated a provider-agnostic, schema-validated, never-state-mutating LLM layer with a deterministic fallback; NIM's free tier is flaky (observed live: timeouts, and a summary that fell through to raw). Adding cheap, independent free providers raises the chance a *summarized* (not raw) result reaches Telegram without any paid dependency, per the owner's request.
 - **Consequence:** New settings `openrouter_*`/`groq_*` + `LLM_MODEL` default; `teams/listener.py` `_summarize` extended; `tests/unit/test_listener_summary.py` covers ladder order + final fallback offline; `02_TRD` §4.1 and env.example reflect the chain. No schema/DB change.
 
+### ADR-012 — Form submission executor enabled per-capability (2026-09-13)
+- **Decision:** The P14.1 form submit executor is enabled for exactly ONE capability: submitting the owner's own placement/feedback Google Forms from **APPROVED** `form_draft` actions. Two switches gate it: `FORM_AUTOMATION_ENABLED` (per-capability SEC-005 switch; off = ✓ Approve stays terminal) and `FORM_SUBMIT_DRY_RUN=true` (default: fills + screenshots to Telegram, never clicks Submit, the draft stays APPROVED — flip only after verifying one real form). Field mapping is smart, never hardcoded: deterministic hints → schema-validated LLM choice among catalog keys → skip + report; unknown/new columns are left empty and reported; a required field without a value BLOCKS submission; nothing is ever invented (ADR-004). The DEC-008 boundary is untouched: post-shortlist KYC attendance stays always-manual and only feedback forms reach the executor.
+- **Rationale:** The owner requested auto-submit after per-draft approval with graceful handling of new columns. Approval-gated execution satisfies ADR-008/SEC-004/SEC-005 with a per-capability switch instead of flipping the global kill switch.
+- **Consequence:** `pia_worker/automation/` package (fields/gform/executor); `routes/actions.py` approve enqueues the job when enabled; the worker image gains headless chromium; both flags live in settings/env.example; every EXECUTING/SUCCEEDED/FAILED hop is audited; the first real form tunes the DOM selectors (dry-run makes that safe).
+
 ---
 
 ## 3. Architecture Summary

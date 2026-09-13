@@ -74,6 +74,13 @@ class Settings(BaseSettings):
     # SEC-005 kill switch — same refusal rule as the API.
     action_automation_enabled: bool = False
 
+    # P14.1 form submit executor (ADR-012, per-capability SEC-005 switch):
+    # FORM_AUTOMATION_ENABLED gates the whole executor; FORM_SUBMIT_DRY_RUN
+    # fills + screenshots but never clicks Submit (safe rollout — flip after
+    # verifying one real form).
+    form_automation_enabled: bool = False
+    form_submit_dry_run: bool = True
+
     # P10 notifications (DEC-002: Telegram primary channel)
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""

@@ -154,9 +154,25 @@ def _decide(action_id: str, to_status: ActionStatus) -> dict:
 
 @router.post("/actions/{action_id}/approve")
 def approve_action(action_id: str) -> dict:
-    """WAITING_APPROVAL -> APPROVED. Terminal until the P14 executor exists —
-    approval is recorded, audited, and the draft is kept for it to consume."""
-    return _decide(action_id, ActionStatus.APPROVED)
+    """WAITING_APPROVAL -> APPROVED. With FORM_AUTOMATION_ENABLED on (ADR-012)
+    the approved draft is immediately handed to the P14.1 submit executor
+    (which still honors FORM_SUBMIT_DRY_RUN); with it off, approval is
+    terminal and recorded for the executor to consume later."""
+    result = _decide(action_id, ActionStatus.APPROVED)
+    if result.get("type") == "form_draft":
+        from pia_api.jobs import enqueue_form_submit
+        from pia_api.settings import get_settings
+
+        if get_settings().form_automation_enabled:
+            try:
+                enqueue_form_submit(action_id)
+            except Exception as exc:  # noqa: BLE001 — approval must not fail
+                import structlog
+
+                structlog.get_logger().error(
+                    "form_submit_enqueue_failed", action_id=action_id,
+                    error=str(exc)[:120])
+    return result
 
 
 @router.post("/actions/{action_id}/reject")

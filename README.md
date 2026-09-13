@@ -127,7 +127,16 @@ Placement form requests become FORM events with reminders, and each one
 proposes a `form_draft` action pre-filled from your stored profile — shown on
 the dashboard **Approvals** screen. The Teams listener feeds the same
 pipeline: a form link dropped in the meeting chat (with the caption-detected
-teacher/presenter name) becomes a draft too. Nothing is ever submitted without your
+teacher/presenter name) becomes a draft too.
+
+With `FORM_AUTOMATION_ENABLED=true`, approving a draft hands it to the P14.1
+executor: it opens the real form, maps every question smartly (deterministic
+hints → LLM picks among known value keys → unknown columns are skipped and
+reported, never guessed; required gaps BLOCK submission), selects the teacher
+from dropdowns by fuzzy match, and submits — screenshots to Telegram at every
+step. `FORM_SUBMIT_DRY_RUN=true` (default) does everything except the final
+Submit click until you've verified one real form. The company's real KYC
+session stays always-manual (DEC-008). Nothing is ever submitted without your
 explicit per-draft approval (ADR-008); approving only records the decision
 (audited) until the P14 submission executor lands behind its own ADR. KYC
 *session attendance* remains always-manual (DEC-008).

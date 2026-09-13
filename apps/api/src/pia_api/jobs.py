@@ -32,3 +32,13 @@ def enqueue_download_attachment(attachment_id: str) -> None:
         attachment_id,
         retry=Retry(max=5),
     )
+
+
+def enqueue_form_submit(action_id: str) -> None:
+    """P14.1: the owner approved a form_draft — hand it to the executor.
+    No RQ retry: browser failures transition the action to FAILED in-job and
+    are messaged; blind retries would double-drive a live form."""
+    _queue().enqueue(
+        "pia_worker.automation.executor.submit_form_action",
+        action_id,
+    )

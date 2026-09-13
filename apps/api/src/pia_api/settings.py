@@ -46,6 +46,9 @@ class Settings(BaseSettings):
     # Empty = plaintext mode (local dev only) — set before any VPS deployment.
     pia_encryption_key: str = ""
     action_automation_enabled: bool = False  # SEC-005 kill switch
+    # P14.1 per-capability switch (ADR-012): approve enqueues the form
+    # submit job only when this is on (FORM_SUBMIT_DRY_RUN still applies).
+    form_automation_enabled: bool = False
 
     @model_validator(mode="after")
     def enforce_action_kill_switch(self) -> "Settings":

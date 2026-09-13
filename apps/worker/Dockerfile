@@ -12,5 +12,7 @@ COPY apps ./apps
 RUN apt-get update && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir .
+# P14.1: the form submit executor drives a headless chromium in-container.
+RUN playwright install --with-deps chromium
 
 CMD ["python", "-m", "pia_worker.main"]
