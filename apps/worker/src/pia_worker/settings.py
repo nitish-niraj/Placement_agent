@@ -62,6 +62,12 @@ class Settings(BaseSettings):
     # ADR-013 Stage 3: executors for approved proposals (telegram note /
     # event correction / re-parse). Approval-gated by design.
     stage3_executors_enabled: bool = False
+    # ADR-014 Stage 4: reactive per-message judgment for GENERAL/UNKNOWN
+    # messages — OFF by default (docs/09: least necessary; enable only if
+    # misclassified alerts are observed in practice).
+    stage4_reactive_enabled: bool = False
+    stage4_confidence_threshold: float = 0.7
+    stage4_escalation_cap: int = 3
 
     # Summary fallback chain (owner decisions 2026-09-12/13, DEC-010):
     # NIM structured -> OpenRouter -> Groq -> raw transcript. All keys live

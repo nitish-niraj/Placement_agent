@@ -103,7 +103,9 @@ reminder, re-run parse, event field correction). Agent prepares/sequences;
 executors are fixed code; every run audited. `ACTION_AUTOMATION_ENABLED`
 revisited per-capability with an ADR each.
 
-### Stage 4 — Reactive per-message judgment (optional) — needs owner go-ahead
+### Stage 4 — Reactive per-message judgment (optional) — **BUILT 2026-09-13, DORMANT (`STAGE4_REACTIVE_ENABLED=false`)**
+
+**Built as specified:** `pia_worker/agent/reactive.py` — for messages the deterministic classifier placed in GENERAL/UNKNOWN with MEDIUM/LOW importance (its weakest spot), the agent gets one schema-validated second opinion (escalate / digest / ignore). Rule veto holds (CRITICAL/HIGH never reach the judge; no downgrades), escalation needs confidence >= 0.7, escalations are capped at 3/day, every judgment is audited, and it is advisory only. The flag stays OFF until the owner observes a misclassified alert in practice.
 
 Agent judges notify-now/digest/ignore where keyword rules are weakest, with
 rule veto and confidence thresholds. Least necessary; the fixed pipeline

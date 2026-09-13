@@ -115,6 +115,11 @@ deterministic Stage 3 executor (Telegram reminder card, approved event-field
 correction, or a deterministic re-parse — ADR-013,
 `STAGE3_EXECUTORS_ENABLED=false` turns them off). Every run is audited.
 
+**Stage 4 (built, dormant):** messages the classifier can't confidently place
+can get one agent second opinion (escalate / digest / ignore — rule veto,
+confidence threshold, daily cap, audited). Off by default
+(`STAGE4_REACTIVE_ENABLED=true` to enable).
+
 Also available as the "Ask PIA" screen in the dashboard. The answer rides the
 **DEC-010 ladder** (NIM structured → OpenRouter → Groq → deterministic stored
 evidence); each result carries a `source` field naming the rung that answered

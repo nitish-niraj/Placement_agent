@@ -143,7 +143,36 @@ def process_message(message_id: str, correlation_id: str = "") -> str:
         and domain.value not in ("GENERAL", "UNKNOWN")
     ):
         _enqueue_extract_events(message_id)
+    elif (
+        row.enabled
+        and importance is not None
+        and importance.value in ("MEDIUM", "LOW")
+        and domain is not None
+        and domain.value in ("GENERAL", "UNKNOWN")
+    ):
+        # ADR-011 Stage 4 (dormant by default): the classifier's weakest spot —
+        # a possibly-relevant message it couldn't place. One bounded second
+        # opinion, gated by STAGE4_REACTIVE_ENABLED (never mutates state).
+        _enqueue_reactive_judgment(message_id)
     return "processed"
+
+
+def _enqueue_reactive_judgment(message_id: str) -> None:
+    try:
+        from redis import Redis
+        from rq import Queue
+
+        from pia_worker.queue import DEFAULT_QUEUE
+        from pia_worker.settings import get_settings
+
+        if not get_settings().stage4_reactive_enabled:
+            return
+        Queue(DEFAULT_QUEUE, connection=Redis.from_url(get_settings().redis_url)).enqueue(
+            "pia_worker.agent.reactive.judge_message", message_id
+        )
+    except Exception as exc:  # noqa: BLE001 — chaining failure is logged, retryable
+        logger.warning("reactive_judgment_enqueue_failed", message_id=message_id,
+                       error=str(exc)[:120])
 
 
 def _enqueue_extract_events(message_id: str) -> None:

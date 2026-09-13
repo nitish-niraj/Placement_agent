@@ -90,6 +90,11 @@ Where the two source docs conflict, the **Master Requirements doc wins**, except
 - **Rationale:** The reviewer proposes (Stage 2); approval should make the trivial actions happen without more manual steps. Executors are fixed code, never LLM-driven; the LLM's only role was the proposal, which the owner saw and approved with its exact work fields rendered on the dashboard.
 - **Consequence:** `pia_worker/executors/` package; approve endpoint enqueues the right executor per type; reviewer `propose_action` gains structured work fields (event_id/field/value, message_id) validated at propose time; DEC-008 boundary untouched (a kyc_reminder is a Telegram message, never session automation).
 
+### ADR-014 — Stage 4 reactive judgment built, dormant by default (2026-09-13)
+- **Decision:** The Stage 4 reactive per-message judgment is built in its narrow, docs-sanctioned form and ships **OFF** (`STAGE4_REACTIVE_ENABLED=false`): for messages the deterministic classifier placed in GENERAL/UNKNOWN with MEDIUM/LOW importance (its weakest spot — such messages never become events or alerts), the agent gets ONE schema-validated second opinion (escalate / digest / ignore). Rule veto holds (CRITICAL/HIGH messages are never consulted and the judge can never downgrade an alert), escalation requires the confidence threshold (0.7), escalations are capped per day (3), every judgment is audited, and it is advisory only — it sends a message, never mutates state.
+- **Rationale:** docs/09 §7 records that the fixed pipeline already performs this well; the feature exists to close the last "lost alert" edge case and stays dormant until the owner observes a misclassified alert in practice and flips the flag.
+- **Consequence:** `pia_worker/agent/reactive.py`; process_message enqueues the judgment only when the flag is on; no schema change (judgments live in audit_logs).
+
 ---
 
 ## 3. Architecture Summary

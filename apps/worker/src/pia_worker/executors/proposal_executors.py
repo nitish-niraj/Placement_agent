@@ -58,7 +58,8 @@ def _telegram_note(row: dict) -> dict:
         f"{emoji} <b>Reminder (you approved this)</b>\n"
         f"{payload.get('title') or row['target']}\n"
         f"💡 {payload.get('reason')}\n"
-        f"<i>Approved draft — rejecting similar proposals stops these.</i>"))
+        "<i>Rejected proposals of the same target won't come back — that's "
+        "how you silence a topic.</i>"))
     return {"sent": "telegram_note"}
 
 

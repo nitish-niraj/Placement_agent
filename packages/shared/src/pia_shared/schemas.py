@@ -155,6 +155,16 @@ class AgentDecision(BaseModel):
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
 
 
+class ReactiveJudgment(BaseModel):
+    """ADR-011 Stage 4: the agent's second opinion for messages the
+    deterministic classifier placed in GENERAL/UNKNOWN. Advisory only — the
+    rule veto and confidence threshold hold, and nothing here mutates state."""
+
+    verdict: str  # escalate | digest | ignore
+    reason: str
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
 class MeetingSummary(BaseModel):
     """P12+ Teams-listener output (Type-1 informational KYC, DEC-008 amendment).
     Composed ONLY from the live captions/chat transcript the listener captured;
