@@ -10,6 +10,7 @@ persisted to agent_traces (best-effort — persistence never breaks an answer).
 """
 
 import json
+from collections.abc import Callable
 
 import sqlalchemy
 import structlog
@@ -44,8 +45,9 @@ Available tools:
 {tool_docs}"""
 
 
-def _tool_docs() -> str:
-    return "\n".join(f"- {name}: {desc}" for name, desc in tools.TOOL_SPECS.items())
+def _tool_docs(specs: dict[str, str] | None = None) -> str:
+    return "\n".join(f"- {name}: {desc}"
+                     for name, desc in (specs or tools.TOOL_SPECS).items())
 
 
 def _observation(result) -> str:
@@ -57,23 +59,44 @@ def _scratchpad(question: str, history: list[str]) -> str:
     return text[-_SCRATCHPAD_CAP:]
 
 
-def run_agent(question: str) -> dict:
+def run_agent(question: str, *, system: str | None = None,
+              extra_tools: dict[str, tuple[str, Callable[..., object]]] | None = None,
+              max_steps: int | None = None) -> dict:
     """The bounded loop. Returns {answer, citations, steps, source, confidence,
     fallback}; source == "agent" only when the loop answered. Raises
-    ProviderError on model failure or dead end — ask_agent degrades."""
+    ProviderError on model failure or dead end — ask_agent degrades.
+
+    Stage 2 hooks: `system` replaces the default ask prompt, `extra_tools`
+    maps tool name -> (description, handler(args_dict)) — the handler runs in
+    place of the read-only registry (this is how the reviewer proposes), and
+    `max_steps` overrides the configured budget."""
     settings = get_settings()
-    max_steps = max(1, settings.agent_max_steps)
+    max_steps = max(1, max_steps if max_steps is not None
+                    else settings.agent_max_steps)
+    specs = dict(tools.TOOL_SPECS)
+    handlers: dict[str, Callable[..., object]] = {}
+    for name, (desc, handler) in (extra_tools or {}).items():
+        specs[name] = desc
+        handlers[name] = handler
+    base = system or AGENT_SYSTEM
+    # replace, not .format() — custom prompts may contain JSON braces
+    system_text = base.replace("{tool_docs}", _tool_docs(specs))
     provider = NIMProvider()
     engine = engine_for_current_host()
     history: list[str] = []
     steps: list[dict] = []
     seen_ids: set[str] = set()
 
+    def _dispatch(name: str, args: dict[str, str]):
+        if name in handlers:
+            return handlers[name](**args)
+        return tools.run_tool(conn, name, args)
+
     with engine.connect() as conn:
         for step_no in range(1, max_steps + 1):
             decision: AgentDecision = provider.complete_structured(
                 task="agent_step",
-                system=AGENT_SYSTEM.format(tool_docs=_tool_docs()),
+                system=system_text,
                 user=_scratchpad(question, history),
                 schema=AgentDecision,
                 correlation_id="",
@@ -106,7 +129,7 @@ def run_agent(question: str) -> dict:
                 continue
             if not decision.tool:
                 raise ProviderError(f"agent step {step_no}: no tool, no answer")
-            result = tools.run_tool(conn, decision.tool, dict(decision.args))
+            result = _dispatch(decision.tool, dict(decision.args))
             if isinstance(result, list):
                 for row in result:
                     if isinstance(row, dict):

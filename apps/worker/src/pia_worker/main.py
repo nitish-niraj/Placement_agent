@@ -78,6 +78,32 @@ def _digest_loop(client: redis_lib.Redis, hour: int, minute: int) -> None:
             logger.warning("digest_enqueue_failed")
 
 
+def _reviewer_loop(client: redis_lib.Redis, hour: int, minute: int) -> None:
+    """ADR-011 Stage 2: daily proactive reviewer, 30 minutes after the digest
+    (the digest has informed; the reviewer proposes what needs deciding)."""
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+
+    from pia_worker.settings import get_settings
+
+    queue = Queue(MAINTENANCE_QUEUE, connection=client)
+    tz = ZoneInfo(get_settings().app_timezone)
+    while True:
+        now = dt.datetime.now(tz=tz)
+        # timedelta, not minute+30: a digest at :45 would overflow .minute
+        target = (now.replace(hour=hour, minute=minute, second=0,
+                              microsecond=0) + dt.timedelta(minutes=30))
+        if target <= now:
+            target += dt.timedelta(days=1)
+        wait_seconds = (target - now).total_seconds()
+        logger.info("reviewer_scheduled", at=target.isoformat())
+        time.sleep(wait_seconds)
+        try:
+            queue.enqueue("pia_worker.agent.reviewer.daily_review")
+        except Exception:  # noqa: BLE001 — scheduler must never crash the worker
+            logger.warning("reviewer_enqueue_failed")
+
+
 def main() -> None:
     settings = get_settings()
     structlog.configure(
@@ -121,6 +147,15 @@ def main() -> None:
         name="pia-digest",
     )
     digest.start()
+
+    if settings.reviewer_enabled:
+        reviewer = threading.Thread(
+            target=_reviewer_loop,
+            args=(connection, settings.digest_hour, settings.digest_minute),
+            daemon=True,
+            name="pia-reviewer",
+        )
+        reviewer.start()
 
     # Self-healing worker loop: a transient Redis blip must never leave the
     # pipeline dead (chaos-test requirement: "worker restart" §20; NFR-001).

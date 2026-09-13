@@ -155,3 +155,23 @@ class TestScratchpad:
     def test_observation_capped(self) -> None:
         blob = {"rows": ["y" * 5000]}
         assert len(agent_loop._observation(blob)) <= 1500
+
+    def test_extra_tools_hook_runs_instead_of_registry(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[dict] = []
+
+        def handler(**kw):
+            calls.append(kw)
+            return {"proposed": True}
+
+        _wire(monkeypatch, [
+            _decision(tool="propose_action",
+                      args={"type": "x", "target": "t", "reason": "r"}),
+            _decision(final_answer="ok"),
+        ])
+        result = agent_loop.run_agent(
+            "q?", system="You review placement data.\nTools:\n{tool_docs}",
+            extra_tools={"propose_action": ("propose one item", handler)})
+        assert calls == [{"type": "x", "target": "t", "reason": "r"}]
+        assert result["source"] == "agent"

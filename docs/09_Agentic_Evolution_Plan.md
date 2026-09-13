@@ -83,7 +83,9 @@ flowchart TD
 - Dashboard: Ask screen shows the reasoning trace (tool calls + results).
 - Regression set: ~15 goals with expected tool sequences in CI.
 
-### Stage 2 — Proactive reviewer (proposes, never acts) — needs owner go-ahead
+### Stage 2 — Proactive reviewer (proposes, never acts) — owner go-ahead given, **BUILT 2026-09-13**
+
+**Built as specified:** `pia_worker/agent/reviewer.py` — daily run 30 minutes after the digest (worker thread, `REVIEWER_ENABLED` switch): a bounded pass (max 8 steps) over the read tools plus ONE mutating tool, `propose_action`, whose only effect is a row in the `actions` table (PROPOSED -> WAITING_APPROVAL, types allowlisted: deadline_nudge / verify_field / data_quality / kyc_reminder / follow_up; max 3 per run; dedup per target; evidence required in reason). Owner approves/rejects on the Approvals screen; a Telegram summary lists what was proposed. Any LLM failure skips the day silently. Q-A1: daily post-digest cadence (spec default). Q-A2: traces are owner-visible via `GET /api/v1/agent/traces` + an 'Agent traces' card on the Audit screen (recommended option). Stages 3-4 still need owner go-ahead.
 
 Daily agent run after the digest with a review goal over read tools + one new
 tool: `propose_action(type, payload)` → `actions` row (`PROPOSED →

@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     llm_timeout_seconds: int = 45
     ask_retrieve_k: int = 8  # P12 conversational search context size
     agent_max_steps: int = 6  # ADR-011 Stage 1 bounded ReAct loop
+    reviewer_enabled: bool = True  # ADR-011 Stage 2 daily reviewer
 
     # Summary fallback chain (owner decisions 2026-09-12/13, DEC-010):
     # NIM structured -> OpenRouter -> Groq -> raw transcript. All keys live

@@ -74,20 +74,51 @@ interface Audit {
            result: string; metadata: Record<string, unknown>; created_at: string }[];
 }
 
+interface AgentTrace {
+  id: string; question: string; source: string; answer: string;
+  steps: { step: number; tool: string | null; thought: string }[];
+  created_at: string;
+}
+
+function AgentTraces() {
+  const { data, error, loading } = useApi<{ traces: AgentTrace[] }>("/agent/traces");
+  if (loading) return <Loading />;
+  if (error || !data) return <ErrorNote message={error ?? "no data"} />;
+  return (
+    <Card title="Agent traces — Stage 1/2 runs with their reasoning (ADR-011)" wide>
+      <Table
+        head={["When", "Rung", "Question", "What it did", "Answer"]}
+        rows={data.traces.map((t) => [
+          fmt(t.created_at), t.source,
+          t.question.slice(0, 60),
+          t.steps.length
+            ? t.steps.map((s) => s.tool ?? "answer").join(" → ")
+            : "—",
+          t.answer.slice(0, 120),
+        ])}
+      />
+      {data.traces.length === 0 && <p className="muted">No agent runs yet.</p>}
+    </Card>
+  );
+}
+
 export function Audit() {
   const { data, error, loading } = useApi<Audit>("/audit");
   if (loading) return <Loading />;
   if (error || !data) return <ErrorNote message={error ?? "no data"} />;
   return (
-    <Card title="Audit trail — every decision is traceable (SEC-004, NFR-007)" wide>
-      <Table
-        head={["When", "Actor", "Action", "Entity", "Result"]}
-        rows={data.audit.map((a) => [
-          fmt(a.created_at), a.actor, a.action,
-          `${a.entity_type} ${a.entity_id ? a.entity_id.slice(0, 8) : ""}`,
-          a.result,
-        ])}
-      />
-    </Card>
+    <>
+      <Card title="Audit trail — every decision is traceable (SEC-004, NFR-007)" wide>
+        <Table
+          head={["When", "Actor", "Action", "Entity", "Result"]}
+          rows={data.audit.map((a) => [
+            fmt(a.created_at), a.actor, a.action,
+            `${a.entity_type} ${a.entity_id ? a.entity_id.slice(0, 8) : ""}`,
+            a.result,
+          ])}
+        />
+      </Card>
+      <AgentTraces />
+    </>
   );
 }

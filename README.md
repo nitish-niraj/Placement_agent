@@ -106,6 +106,13 @@ answers restate tool results with citations, the reasoning trace is shown and
 stored in `agent_traces`, and any LLM failure degrades to the single-shot
 ladder below.
 
+**Stage 2 — the daily reviewer:** 30 minutes after the nightly digest, a
+bounded agent pass reviews your deadlines, eligibility, and events and files
+up to 3 evidence-backed proposals on the Approvals screen (types: deadline
+nudge, verify-field, data-quality, KYC reminder, follow-up), with a Telegram
+summary. It proposes, never acts — approve or reject like any draft
+(`REVIEWER_ENABLED=false` turns it off).
+
 Also available as the "Ask PIA" screen in the dashboard. The answer rides the
 **DEC-010 ladder** (NIM structured → OpenRouter → Groq → deterministic stored
 evidence); each result carries a `source` field naming the rung that answered

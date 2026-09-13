@@ -339,6 +339,26 @@ def ask(payload: AskRequest) -> dict:
     return ask_question(payload.question.strip())
 
 
+@router.get("/agent/traces")
+def agent_traces(limit: int = 20) -> dict:
+    """ADR-011 Q-A2 (recommended): agent traces are owner-visible — the last
+    reviewer/ask runs with their step traces (read-only observability)."""
+    import sqlalchemy
+
+    from pia_api.db import get_engine
+
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = conn.execute(
+            sqlalchemy.text(
+                "SELECT id, question, source, answer, steps, created_at "
+                "FROM agent_traces ORDER BY created_at DESC LIMIT :lim"
+            ),
+            {"lim": min(limit, 100)},
+        ).mappings().all()
+    return {"traces": [dict(r) for r in rows]}
+
+
 @router.post("/agent/ask")
 def agent_ask(payload: AskRequest) -> dict:
     """ADR-011 Stage 1: the bounded tool-using agent — multi-step answers

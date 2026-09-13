@@ -30,10 +30,11 @@ _PROPOSABLE_TYPES = ("FORM", "KYC")
 _RETRYABLE_STATES = ("FAILED", "EXPIRED")  # only these may be re-proposed
 
 
-def _propose(target: str, payload: dict) -> str:
-    """Shared draft creation: dedup per target URL, insert PROPOSED, walk to
-    WAITING_APPROVAL on the §10.4 machine, audit both hops. Returns an
-    outcome string (job-friendly, extract_events-style)."""
+def _propose(target: str, payload: dict, action_type: str = "form_draft") -> str:
+    """Shared proposal creation: dedup per target, insert PROPOSED, walk to
+    WAITING_APPROVAL on the §10.4 machine, audit both hops. action_type is
+    'form_draft' for forms and a reviewer type for Stage 2 proposals.
+    Returns an outcome string (job-friendly, extract_events-style)."""
     engine = _engine_for_current_host()
     user_id, existing = None, None
     with engine.connect() as conn:
@@ -57,10 +58,10 @@ def _propose(target: str, payload: dict) -> str:
         action_id = conn.execute(
             sqlalchemy.text(
                 "INSERT INTO actions (user_id, type, target, payload, risk_level, "
-                "status, approval_required) VALUES (:user_id, 'form_draft', :target, "
+                "status, approval_required) VALUES (:user_id, :type, :target, "
                 "CAST(:payload AS jsonb), 'medium', 'PROPOSED', true) RETURNING id"
             ),
-            {"user_id": user_id, "target": target,
+            {"user_id": user_id, "type": action_type, "target": target,
              "payload": json.dumps(payload, default=str)},
         ).scalar()
         # The §10.4 machine owns the lifecycle — assert it even on creation.

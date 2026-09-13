@@ -17,7 +17,8 @@ interface ActionRow {
   created_at: string;
   updated_at: string;
   event: { id: string; title: string | null; company: string | null } | null;
-  payload: { presenters?: string[]; company?: string | null; source?: string } | null;
+  payload: { presenters?: string[]; company?: string | null; source?: string;
+             reason?: string; proposal_type?: string } | null;
   prefill: Record<string, string | number | null> | null;
 }
 
@@ -78,8 +79,14 @@ export function Approvals() {
           rows={pending.map((a) => [
             fmt(a.created_at),
             <span key="t">
+              <span className="badge">{a.type}</span>{" "}
               {a.event?.company ?? a.payload?.company ?? "General"} —{" "}
-              <a href={a.target} target="_blank" rel="noreferrer">{a.target}</a>
+              {a.target.startsWith("http")
+                ? <a href={a.target} target="_blank" rel="noreferrer">{a.target}</a>
+                : <code>{a.target}</code>}
+              {a.payload?.reason ? (
+                <><br /><span className="muted">💡 {a.payload.reason}</span></>
+              ) : null}
               {a.payload?.presenters?.length ? (
                 <><br /><span className="muted">👤 Teacher/presenter: {a.payload.presenters.join(", ")}</span></>
               ) : null}
