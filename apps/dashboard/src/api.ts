@@ -57,3 +57,20 @@ export function useApi<T>(path: string | null, deps: unknown[] = []) {
 export async function post<T>(path: string, body: unknown): Promise<T> {
   return api<T>(path, { method: "POST", body: JSON.stringify(body) });
 }
+
+export interface PreviewError {
+  status: number | null;
+  message: string;
+}
+
+/** Split server errors ("422: detail…") into a status the panel can branch
+on. Pure — unit-tested. */
+export function parsePreviewError(raw: unknown): PreviewError {
+  const text = raw instanceof Error
+    ? raw.message
+    : "could not build the pre-filled form";
+  const match = text.match(/^(\d+):\s*([\s\S]*)$/);
+  return match
+    ? { status: Number(match[1]), message: match[2] || text }
+    : { status: null, message: text };
+}

@@ -213,6 +213,23 @@ class TestLinkResolution:
         assert pa.propose_meeting_form_action("https://tinyurl.com/x") == (
             "skipped_not_a_form")
 
+    def test_microsoft_and_glide_accepted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for final in ("https://forms.office.com/r/AbCdEf123",
+                      "https://forms.glide.com/f/abc"):
+            self._propose_short(monkeypatch, final)
+
+    def _propose_short(self, monkeypatch: pytest.MonkeyPatch, final: str) -> None:
+        conn = FakeConn(_script(None, links=["https://tinyurl.com/x"]))
+        monkeypatch.setattr(pa, "_engine_for_current_host",
+                            lambda: FakeEngine(conn))
+        monkeypatch.setattr(pa, "_fetch_final_url", lambda url: final)
+        assert pa.propose_form_action("event-uuid") == "proposed"
+        inserts = [p for sql, p in conn.executed
+                   if "INSERT INTO actions" in sql and p]
+        assert inserts[0]["target"] == final
+
 
 class TestMeetingProposal:
     """Listener entry (P13): a form link relayed from the Teams meeting chat

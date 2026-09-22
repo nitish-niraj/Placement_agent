@@ -61,6 +61,12 @@ const RUNNER = `(()=>{const V=__V__;const H=__H__;const sleep=ms=>new Promise(r=
 `const t=document.createElement("b");t.textContent="PIA auto-fill: "+filled.length+" filled, "+skipped.length+" left";d.appendChild(t);` +
 `skipped.forEach(s=>{const r=document.createElement("div");r.textContent="\\u2718 "+s;d.appendChild(r);});` +
 `const f=document.createElement("div");f.style.cssText="margin-top:8px;color:#666";f.textContent="Review everything, then click Submit.";d.appendChild(f);` +
+`const c=document.createElement("button");c.textContent="\\ud83d\\udccb Copy summary";c.style.cssText="margin-top:8px;cursor:pointer";` +
+`c.onclick=()=>{const s="PIA auto-fill — filled ("+filled.length+"): "+(filled.join("; ")||"none")+" | left ("+skipped.length+"): "+(skipped.join("; ")||"none");` +
+`const done=()=>{c.textContent="Copied — paste it to PIA/Telegram";};` +
+`if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(s).then(done,function(){fallback();});}else{fallback();}` +
+`function fallback(){const ta=document.createElement("textarea");ta.value=s;document.body.appendChild(ta);ta.select();try{document.execCommand("copy");done();}catch(e){}document.body.removeChild(ta);}};` +
+`d.appendChild(c);` +
 `document.body.appendChild(d);})();})();`;
 
 export function buildFillSnippet(

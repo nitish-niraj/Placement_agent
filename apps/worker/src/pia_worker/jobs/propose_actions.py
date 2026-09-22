@@ -24,6 +24,7 @@ import sqlalchemy
 import structlog
 
 from pia_shared.enums import ActionStatus
+from pia_shared.formlinks import GLIDE, GOOGLE, MICROSOFT, TEAMS, detect_form_provider
 from pia_shared.states import assert_valid_transition
 from pia_worker.db import engine_for_current_host as _engine_for_current_host
 
@@ -45,10 +46,13 @@ def _fetch_final_url(url: str) -> str:
 
 def _canonicalize_form_link(url: str) -> str | None:
     """Short links hide the destination (a Teams meeting once posed as a form
-    draft). Resolve to the canonical Google Form URL; None when resolution
-    PROVES it is not a form. Network failures fail OPEN with the raw link —
-    a draft must never be lost to a transient error (the pre-fill endpoint
-    re-validates as backstop). Direct docs.google.com links skip the fetch."""
+    draft). Resolve to the canonical form URL; None when resolution PROVES it
+    is not a fillable form (Teams launcher, unknown site). Google/Microsoft/
+    Glide finals are all accepted — non-Google providers get drafts too (the
+    pre-fill endpoint serves them a guided manual path). Network failures fail
+    OPEN with the raw link — a draft must never be lost to a transient error
+    (the pre-fill endpoint re-validates as backstop). Direct docs.google.com
+    links skip the fetch."""
     parsed = urllib.parse.urlparse(url)
     if parsed.hostname == "docs.google.com" and parsed.path.startswith("/forms/"):
         return url
@@ -64,11 +68,18 @@ def _canonicalize_form_link(url: str) -> str | None:
         logger.warning("form_link_unresolvable", url=url[:80],
                        error=str(last_error)[:120])
         return url
-    final_parsed = urllib.parse.urlparse(final)
-    if (final_parsed.hostname == "docs.google.com"
-            and final_parsed.path.startswith("/forms/")):
+    provider = detect_form_provider(final)
+    if provider == GOOGLE:
         return final
-    logger.warning("form_link_not_a_form", url=url[:80], resolved=final[:80])
+    if provider in (MICROSOFT, GLIDE):
+        # Tripwire: the first live specimen of a new provider lands here —
+        # that is the moment to build its entry parser (not before).
+        logger.info("form_provider_manual", provider=provider, url=url[:80])
+        return final
+    if provider == TEAMS:
+        logger.warning("form_link_not_a_form", url=url[:80], resolved=final[:80])
+    else:
+        logger.warning("form_link_unknown_host", url=url[:80], resolved=final[:80])
     return None
 
 

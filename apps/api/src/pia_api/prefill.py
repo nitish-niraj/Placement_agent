@@ -21,6 +21,9 @@ import urllib.parse
 from dataclasses import dataclass
 
 import httpx
+import structlog
+
+logger = structlog.get_logger()
 
 # Mirror of the worker's deterministic hint catalog (apps/worker/.../fields.py
 # _HINTS): API must not import worker code, so the order and patterns are
@@ -82,9 +85,17 @@ _CHOICE_TYPES = frozenset({2, 3, 4})
 
 
 def resolve_form_url(target: str) -> str:
-    """Follow short links to the canonical Google Form URL. SSRF-guarded:
-    http(s) only, bounded redirects, and the final host must be Google Forms —
-    a short link may point anywhere."""
+    """Follow short links to the canonical form URL. SSRF-guarded: http(s)
+    only, bounded redirects; the final host must be a known form provider
+    (Google/Microsoft/Glide) — a short link may point anywhere."""
+    from pia_shared.formlinks import (
+        GLIDE,
+        GOOGLE,
+        MICROSOFT,
+        TEAMS,
+        detect_form_provider,
+    )
+
     parsed = urllib.parse.urlparse((target or "").strip())
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         raise PrefillError("draft link is not a fetchable http(s) URL", 422)
@@ -94,17 +105,22 @@ def resolve_form_url(target: str) -> str:
             response = client.get(target)
     except httpx.HTTPError as exc:
         raise PrefillError(f"could not open the form link: {exc!s}"[:160]) from exc
-    final = urllib.parse.urlparse(str(response.url))
-    host = final.hostname or ""
-    if final.hostname != "docs.google.com" or not final.path.startswith("/forms/"):
-        if "teams.microsoft.com" in host or host.endswith("teams.live.com"):
-            raise PrefillError("this link opens a Teams meeting, not a form — "
-                               "there is nothing to pre-fill", 422)
-        raise PrefillError("link does not resolve to a Google Form — "
-                           "open it manually", 422)
+    final = str(response.url)
+    provider = detect_form_provider(final)
+    if provider == GOOGLE:
+        pass
+    elif provider in (MICROSOFT, GLIDE):
+        logger.info("form_provider_manual", provider=provider,
+                    target=str(target)[:80])
+    elif provider == TEAMS:
+        raise PrefillError("this link opens a Teams meeting, not a form — "
+                           "there is nothing to pre-fill", 422)
+    else:
+        raise PrefillError("link does not resolve to a supported form "
+                           "(Google/Microsoft/Glide) — open it manually", 422)
     if response.status_code >= 400 and response.status_code not in (401, 403):
         raise PrefillError(f"form page returned HTTP {response.status_code}")
-    return str(response.url)
+    return final
 
 
 def fetch_form_html(url: str) -> str:
@@ -321,20 +337,34 @@ def _without_edit_requested(url: str) -> str:
 
 def prefill_for_target(target: str, bag: dict[str, str]) -> dict:
     """Full pipeline for one draft link. Returns a JSON-safe report (the URL
-    itself is PII-bearing — callers must not log it). Zero entries (e.g. a
-    login-walled form) is a report, not an error: the owner opens it manually
-    (iframe shows Google sign-in under their own session)."""
+    itself is PII-bearing — callers must not log it). Google forms get the
+    entry-ID pipeline; Microsoft/Glide get a guided manual report (their
+    prefill schemes need a live specimen to parse — the tripwire log marks
+    its arrival); zero entries (e.g. a login-walled form) is a report, not
+    an error: the owner opens it manually (iframe shows Google sign-in under
+    their own session)."""
+    from pia_shared.formlinks import GOOGLE, detect_form_provider
+
     canonical = _without_edit_requested(resolve_form_url(target))
+    provider = detect_form_provider(canonical)
+    if provider != GOOGLE:
+        names = {"microsoft": "Microsoft", "glide": "Glide"}
+        label = names.get(provider, "this")
+        return {"prefill_url": canonical, "source_url": canonical,
+                "provider": provider, "filled": [], "left_blank": [],
+                "note": f"{label} form — the portal can't pre-fill these yet: "
+                        "it opens below for you to fill (your login works "
+                        "there); text fields can also use the auto-fill bookmark."}
     entries = extract_entries(fetch_form_html(canonical))
     if not entries:
         return {"prefill_url": build_prefill_url(canonical, {}),
-                "source_url": canonical,
+                "source_url": canonical, "provider": GOOGLE,
                 "filled": [], "left_blank": [],
                 "note": "no readable questions (sign-in wall?) — sign in inside "
                         "the form below and fill manually"}
     filled, left_blank = map_values(entries, bag)
     return {"prefill_url": build_prefill_url(canonical, filled),
-            "source_url": canonical,
+            "source_url": canonical, "provider": GOOGLE,
             "filled": [{"question": e.text[:80]} for e in entries
                        if e.entry_id in filled],
             "left_blank": left_blank, "note": ""}

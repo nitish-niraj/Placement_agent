@@ -209,6 +209,29 @@ class TestResolve:
         finally:
             FakeClient.final_url = CANONICAL
 
+    def test_microsoft_final_resolves(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        FakeClient.final_url = "https://forms.office.com/r/AbCdEf123"
+        try:
+            monkeypatch.setattr(prefill_mod.httpx, "Client", FakeClient)
+            assert prefill_mod.resolve_form_url(
+                "https://tinyurl.com/x") == FakeClient.final_url
+        finally:
+            FakeClient.final_url = CANONICAL
+
+    def test_microsoft_gets_manual_report(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ms_url = "https://forms.office.com/r/AbCdEf123"
+        monkeypatch.setattr(prefill_mod, "resolve_form_url", lambda target: ms_url)
+        calls: list[str] = []
+        monkeypatch.setattr(prefill_mod, "fetch_form_html",
+                            lambda url: calls.append(url) or "")
+        report = prefill_mod.prefill_for_target("https://tinyurl.com/x", {})
+        assert report["provider"] == "microsoft"
+        assert report["filled"] == [] and "bookmark" in report["note"]
+        assert report["prefill_url"] == ms_url
+        assert calls == []  # no fetch attempted for manual providers
+
 
 class TestFetch:
     def test_ok(self, monkeypatch: pytest.MonkeyPatch) -> None:

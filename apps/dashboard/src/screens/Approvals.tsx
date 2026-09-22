@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api, post, useApi } from "../api";
+import { api, parsePreviewError, post, useApi } from "../api";
 import { buildFillSnippet } from "../fillSnippet";
 import { fmt } from "../ui";
 import { Badge, Card, ErrorNote, Loading, Table } from "../ui";
@@ -85,6 +85,43 @@ function PrefillDetails({ prefill }: { prefill: Record<string, string | number |
   );
 }
 
+function FillKit({ prefill }: { prefill: Record<string, string | number | null> }) {
+  const [copied, setCopied] = useState<string | null>(null);
+  const rows = Object.entries(prefill).filter(
+    ([, v]) => v !== null && v !== undefined && String(v).trim());
+  if (rows.length === 0) return null;
+  const copy = async (key: string, value: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+    } catch {
+      const ta = document.createElement("textarea");
+      ta.value = value;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
+    setCopied(key);
+    setTimeout(() => setCopied((cur) => (cur === key ? null : cur)), 1500);
+  };
+  return (
+    <div>
+      <span className="muted">Fill kit — copy a value, paste it into the form:</span>
+      <ul>
+        {rows.map(([key, value]) => (
+          <li key={key}>
+            {PREFILL_LABELS[key] ?? key}: <code>{String(value)}</code>{" "}
+            <button className="secondary"
+                    onClick={() => copy(key, String(value))}>
+              {copied === key ? "Copied ✓" : "Copy"}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 export function Approvals() {
   const { data, error, loading, reload } = useApi<ActionsResponse>("/actions");
   const [busy, setBusy] = useState<string | null>(null);
@@ -120,11 +157,7 @@ export function Approvals() {
     try {
       setPreview(await api<PrefillPreview>(`/actions/${id}/prefill-url`));
     } catch (e) {
-      const raw = e instanceof Error ? e.message : "could not build the pre-filled form";
-      const match = raw.match(/^(\d+):\s*([\s\S]*)$/);
-      setPreviewError(match
-        ? { status: Number(match[1]), message: match[2] || raw }
-        : { status: null, message: raw });
+      setPreviewError(parsePreviewError(e));
     } finally {
       setPreviewLoading(false);
     }
@@ -249,6 +282,9 @@ export function Approvals() {
                 {!prefilled && (
                   <>
                     {preview.note && <p className="muted">{preview.note}</p>}
+                    {openDraft.prefill && (
+                      <FillKit prefill={openDraft.prefill} />
+                    )}
                     {openDraft.prefill && (
                       <p>
                         🔖{" "}
