@@ -141,9 +141,9 @@ def extract_events(message_id: str) -> str:
             from redis import Redis
             from rq import Queue
 
-            from pia_worker.queue import DEFAULT_QUEUE
+            from pia_worker.queue import DEFAULT_QUEUE, REALTIME_QUEUE
 
-            Queue(DEFAULT_QUEUE, connection=Redis.from_url(settings.redis_url)).enqueue(
+            Queue(REALTIME_QUEUE, connection=Redis.from_url(settings.redis_url)).enqueue(
                 "pia_worker.jobs.notify.notify_event", event_id, outcome
             )
             if event_type.value in ("FORM", "KYC"):  # P13/F-030: propose the draft

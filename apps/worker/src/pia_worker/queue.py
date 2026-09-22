@@ -10,10 +10,16 @@ from typing import Any
 import redis as redis_lib
 from rq import Queue, Retry
 
+from pia_shared.queues import (
+    DEFAULT_QUEUE,
+    MAINTENANCE_QUEUE,
+    REALTIME_QUEUE,
+    parse_queue_names,
+)
 from pia_worker.settings import get_settings
 
-DEFAULT_QUEUE = "default"
-MAINTENANCE_QUEUE = "maintenance"
+__all__ = ["DEFAULT_QUEUE", "MAINTENANCE_QUEUE", "REALTIME_QUEUE",
+           "parse_queue_names", "make_connection", "make_queue", "enqueue_job"]
 
 
 def make_connection(redis_url: str | None = None) -> redis_lib.Redis:

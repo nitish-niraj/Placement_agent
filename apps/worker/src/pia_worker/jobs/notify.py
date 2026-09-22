@@ -91,11 +91,11 @@ def _enqueue_send(notification_id: str) -> None:
     from redis import Redis
     from rq import Queue, Retry
 
-    from pia_worker.queue import DEFAULT_QUEUE
+    from pia_worker.queue import REALTIME_QUEUE
     from pia_worker.settings import get_settings
 
     settings = get_settings()
-    Queue(DEFAULT_QUEUE, connection=Redis.from_url(settings.redis_url)).enqueue(
+    Queue(REALTIME_QUEUE, connection=Redis.from_url(settings.redis_url)).enqueue(
         "pia_worker.jobs.notify.send_notification", notification_id,
         retry=Retry(max=settings.notify_send_attempts),
     )

@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     # when empty, the webhook endpoint refuses everything (503).
     evolution_webhook_secret: str = ""
     webhook_rate_limit_per_minute: int = 600  # history-sync bursts are legitimate
+    # Round 2 throughput: per-group burst shaping window + budget. Past the
+    # budget, message jobs get scheduled delays (never dropped).
+    webhook_burst_per_group: int = 120
+    webhook_burst_window_seconds: int = 300
 
     # Policy
     media_max_size_mb: int = 25

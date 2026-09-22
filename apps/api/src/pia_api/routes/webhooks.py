@@ -47,6 +47,8 @@ logger = structlog.get_logger()
 router = APIRouter(tags=["webhooks"])
 
 RATE_LIMIT_WINDOW_SECONDS = 60
+BURST_WINDOW_SECONDS = 300
+BURST_MAX_DELAY_SECONDS = 600
 
 
 def _rate_limited(ip: str) -> bool:
@@ -61,6 +63,28 @@ def _rate_limited(ip: str) -> bool:
     except Exception:  # noqa: BLE001 — limiter outage fails OPEN: auth (SEC-003) is
         logger.warning("rate_limiter_unavailable")  # still enforced; flow never dies
         return False
+
+
+def _burst_delay_seconds(group_key: str | None) -> int:
+    """Round 2 throughput: per-group burst shaping. History-sync floods dump
+    hundreds of messages in seconds; instead of enqueuing them all NOW (which
+    buries realtime jobs behind bulk), messages past the per-window budget get
+    an RQ scheduled delay that spreads the burst. Nothing is dropped or
+    rejected — only shifted in time. Redis outage fails open (delay 0)."""
+    if not group_key:
+        return 0
+    settings = get_settings()
+    try:
+        client = redis_lib.Redis.from_url(settings.redis_url, socket_connect_timeout=1)
+        key = f"pia:burst:{group_key}"
+        count = client.incr(key)
+        if count == 1:
+            client.expire(key, settings.webhook_burst_window_seconds)
+        over = count - settings.webhook_burst_per_group
+        return max(0, min(over, BURST_MAX_DELAY_SECONDS))
+    except Exception:  # noqa: BLE001 — shaper outage fails open
+        logger.warning("burst_shaper_unavailable")
+        return 0
 
 
 def _authorized(token_header: str | None) -> bool:
@@ -97,7 +121,7 @@ async def evolution_webhook(
 
     correlation_id = str(uuid.uuid4())
     stored = duplicates = ignored = 0
-    to_enqueue: list[tuple[str, str | None]] = []
+    to_enqueue: list[tuple[str, str | None, str | None]] = []
     try:
         if event == "connection.update":
             _handle_connection_update(instance, data if isinstance(data, dict) else {})
@@ -110,13 +134,13 @@ async def evolution_webhook(
             items = data if isinstance(data, list) else [data]
             for item in items:
                 if isinstance(item, dict):
-                    result, message_id, attachment_id = _handle_message_upsert(
+                    result, message_id, attachment_id, group_key = _handle_message_upsert(
                         instance, item, correlation_id, payload
                     )
                     if result == "stored":
                         stored += 1
                         assert message_id is not None  # guaranteed on "stored"
-                        to_enqueue.append((message_id, attachment_id))
+                        to_enqueue.append((message_id, attachment_id, group_key))
                     elif result == "duplicate":
                         duplicates += 1
                     else:
@@ -132,15 +156,22 @@ async def evolution_webhook(
 
     # Job fan-out happens after the DB transaction committed. An enqueue failure
     # must not fail the webhook — the message stays VALIDATED (visible, re-driveable).
+    # Burst shaping: over-budget groups get scheduled delays (never drops).
     from pia_api.jobs import enqueue_download_attachment, enqueue_process_message
 
-    for message_id, attachment_id in to_enqueue:
+    shaped = 0
+    for message_id, attachment_id, group_key in to_enqueue:
         try:
-            enqueue_process_message(message_id, correlation_id)
+            delay = _burst_delay_seconds(group_key)
+            if delay:
+                shaped += 1
+            enqueue_process_message(message_id, correlation_id, delay_seconds=delay)
             if attachment_id:
-                enqueue_download_attachment(attachment_id)
+                enqueue_download_attachment(attachment_id, delay_seconds=delay)
         except Exception as exc:
             logger.error("enqueue_failed", message_id=message_id, error=str(exc))
+    if shaped:
+        logger.info("webhook_burst_shaped", messages=shaped, group=str(group_key)[:40])
 
     logger.info(
         "webhook_accepted",
@@ -206,12 +237,12 @@ def _handle_group_upsert(item: dict) -> int:
 
 def _handle_message_upsert(
     instance: str, item: dict, correlation_id: str, raw: dict
-) -> tuple[str, str | None, str | None]:
+) -> tuple[str, str | None, str | None, str | None]:
     key = item.get("key") or {}
     provider_message_id = key.get("id")
     jid = key.get("remoteJid")
     if not provider_message_id or not jid:
-        return "ignored", None, None  # missing identity fields (FR-MSG-001 contract)
+        return "ignored", None, None, jid  # missing identity fields (FR-MSG-001 contract)
 
     message_body = item.get("message") or {}
     text_value = extract_text(message_body)
@@ -268,7 +299,7 @@ def _handle_message_upsert(
         ).first()
 
         if inserted is None:
-            return "duplicate", None, None  # FR-MSG-002: same event -> one logical message
+            return "duplicate", None, None, jid  # FR-MSG-002: same event -> one logical message
 
         # P9 dedup cascade (exact -> visual -> near) BEFORE any enrichment
         # fan-out: suppressed copies are persisted + audited but never
@@ -278,7 +309,7 @@ def _handle_message_upsert(
         )
         if verdict.suppress:
             _mark_suppressed(conn, str(inserted.id), verdict, of_message_id)
-            return "duplicate", None, None
+            return "duplicate", None, None, jid
 
         # Media present -> register an attachment row (FR-WA-006); the worker
         # downloads it via Evolution API into MinIO with retries + size gate.
@@ -319,7 +350,7 @@ def _handle_message_upsert(
                 + dt.timedelta(days=settings.raw_message_retention_days),
             },
         )
-    return "stored", str(inserted.id), attachment_id
+    return "stored", str(inserted.id), attachment_id, jid
 
 
 def _json(value: dict) -> str:

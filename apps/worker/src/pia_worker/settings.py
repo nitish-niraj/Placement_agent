@@ -11,7 +11,13 @@ class Settings(BaseSettings):
 
     environment: str = "development"
     redis_url: str = "redis://localhost:6379/0"
+    # Queues this process drains, in order (realtime first where present).
+    # Compose runs bulk (default,maintenance) + realtime (realtime,maintenance).
+    worker_queues: str = "default,maintenance"
     heartbeat_interval_seconds: int = 10
+    # Watchdog alert thresholds (hourly DLQ/depth/heartbeat digest).
+    watch_queue_depth_threshold: int = 300
+    watch_heartbeat_stale_seconds: int = 300
     default_job_retries: int = 5
     maintenance_interval_hours: int = 24
     deadline_sweep_interval_minutes: int = 60  # DUE_SOON/EXPIRED precision (F-020)

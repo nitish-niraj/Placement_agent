@@ -8,16 +8,27 @@ from redis import Redis
 from rq import Queue, Retry
 
 from pia_api.settings import get_settings
+from pia_shared.queues import DEFAULT_QUEUE, REALTIME_QUEUE
 
-DEFAULT_QUEUE = "default"
 
-
-def _queue() -> Queue:
+def _queue(name: str = DEFAULT_QUEUE) -> Queue:
     settings = get_settings()
-    return Queue(DEFAULT_QUEUE, connection=Redis.from_url(settings.redis_url))
+    return Queue(name, connection=Redis.from_url(settings.redis_url))
 
 
-def enqueue_process_message(message_id: str, correlation_id: str = "") -> None:
+def enqueue_process_message(message_id: str, correlation_id: str = "",
+                              delay_seconds: int = 0) -> None:
+    if delay_seconds > 0:
+        import datetime as _dt
+
+        _queue().enqueue_in(
+            _dt.timedelta(seconds=delay_seconds),
+            "pia_worker.jobs.process_message.process_message",
+            message_id,
+            correlation_id,
+            retry=Retry(max=3),
+        )
+        return
     _queue().enqueue(
         "pia_worker.jobs.process_message.process_message",
         message_id,
@@ -26,7 +37,17 @@ def enqueue_process_message(message_id: str, correlation_id: str = "") -> None:
     )
 
 
-def enqueue_download_attachment(attachment_id: str) -> None:
+def enqueue_download_attachment(attachment_id: str, delay_seconds: int = 0) -> None:
+    if delay_seconds > 0:
+        import datetime as _dt
+
+        _queue().enqueue_in(
+            _dt.timedelta(seconds=delay_seconds),
+            "pia_worker.jobs.process_message.download_attachment",
+            attachment_id,
+            retry=Retry(max=5),
+        )
+        return
     _queue().enqueue(
         "pia_worker.jobs.process_message.download_attachment",
         attachment_id,
@@ -46,9 +67,10 @@ def enqueue_form_submit(action_id: str) -> None:
 
 def enqueue_proposal_executor(action_id: str) -> None:
     """ADR-013 Stage 3: the owner approved a reviewer proposal — hand it to
-    the executor. No RQ retry: failures transition the action to FAILED
+    the executor. Realtime: an approval the owner is waiting on must not sit
+    behind a bulk flood. No RQ retry: failures transition the action to FAILED
     in-job (with Telegram fallback); blind retries would double-send notes."""
-    _queue().enqueue(
+    _queue(REALTIME_QUEUE).enqueue(
         "pia_worker.executors.proposal_executors.run_proposal_executor",
         action_id,
     )
