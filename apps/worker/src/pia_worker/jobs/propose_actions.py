@@ -16,7 +16,9 @@ only path to real-world effect, behind its own ADR (SEC-005;
 ACTION_AUTOMATION_ENABLED stays false)."""
 
 import json
+import urllib.parse
 
+import httpx
 import sqlalchemy
 import structlog
 
@@ -28,6 +30,37 @@ logger = structlog.get_logger()
 
 _PROPOSABLE_TYPES = ("FORM", "KYC")
 _RETRYABLE_STATES = ("FAILED", "EXPIRED")  # only these may be re-proposed
+_RESOLVE_TIMEOUT_S = 10.0
+
+
+def _fetch_final_url(url: str) -> str:
+    """Follow a (possibly shortened) link to its final URL. Thin wrapper so
+    unit tests can stub the network without touching httpx."""
+    with httpx.Client(follow_redirects=True, max_redirects=5,
+                      timeout=_RESOLVE_TIMEOUT_S) as client:
+        return str(client.get(url).url)
+
+
+def _canonicalize_form_link(url: str) -> str | None:
+    """Short links hide the destination (a Teams meeting once posed as a form
+    draft). Resolve to the canonical Google Form URL; None when resolution
+    PROVES it is not a form. Network failures fail OPEN with the raw link —
+    a draft must never be lost to a transient error (the pre-fill endpoint
+    re-validates as backstop). Direct docs.google.com links skip the fetch."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.hostname == "docs.google.com" and parsed.path.startswith("/forms/"):
+        return url
+    try:
+        final = _fetch_final_url(url)
+    except Exception as exc:  # noqa: BLE001 — transient: keep the raw link
+        logger.warning("form_link_unresolvable", url=url[:80], error=str(exc)[:120])
+        return url
+    final_parsed = urllib.parse.urlparse(final)
+    if (final_parsed.hostname == "docs.google.com"
+            and final_parsed.path.startswith("/forms/")):
+        return final
+    logger.warning("form_link_not_a_form", url=url[:80], resolved=final[:80])
+    return None
 
 
 def _propose(target: str, payload: dict, action_type: str = "form_draft") -> str:
@@ -109,7 +142,10 @@ def propose_form_action(event_id: str) -> str:
     links = [str(x) for x in (event["links"] or [])]
     if not links:
         return "skipped_no_link"
-    target = links[0].rstrip("/")
+    raw_target = links[0].rstrip("/")
+    target = _canonicalize_form_link(raw_target)
+    if target is None:
+        return "skipped_not_a_form"
     payload = {
         "source": "whatsapp_message",
         "event_id": event_id,
@@ -129,7 +165,10 @@ def propose_meeting_form_action(
     the feedback form needs that no profile table can supply."""
     if not form_url:
         return "skipped_no_link"
-    target = form_url.rstrip("/")
+    raw_target = form_url.rstrip("/")
+    target = _canonicalize_form_link(raw_target)
+    if target is None:
+        return "skipped_not_a_form"
     payload = {
         "source": "teams_meeting_chat",
         "form_url": target,

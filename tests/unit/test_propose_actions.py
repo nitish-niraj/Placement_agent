@@ -135,6 +135,60 @@ class TestProposalFlow:
         assert pa.propose_form_action("event-uuid") == "skipped_no_link"
 
 
+class TestLinkResolution:
+    """Short links hide the destination: resolve to the canonical Google Form
+    (dedup then works across shorteners), refuse proven non-forms, and never
+    lose a draft to a transient network error."""
+
+    CANONICAL = "https://docs.google.com/forms/d/e/XYZ/viewform"
+    TEAMS = "https://teams.microsoft.com/dl/launcher/launcher.html?url=x"
+
+    def test_short_link_canonicalized(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        conn = FakeConn(_script(None, links=["https://tinyurl.com/x"]))
+        monkeypatch.setattr(pa, "_engine_for_current_host",
+                            lambda: FakeEngine(conn))
+        monkeypatch.setattr(pa, "_fetch_final_url", lambda url: self.CANONICAL)
+        assert pa.propose_form_action("event-uuid") == "proposed"
+        inserts = [p for sql, p in conn.executed
+                   if "INSERT INTO actions" in sql and p]
+        assert inserts[0]["target"] == self.CANONICAL
+        assert json.loads(inserts[0]["payload"])["form_url"] == self.CANONICAL
+
+    def test_proven_non_form_skipped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        conn = FakeConn(_script(None, links=["https://tinyurl.com/x"]))
+        monkeypatch.setattr(pa, "_engine_for_current_host",
+                            lambda: FakeEngine(conn))
+        monkeypatch.setattr(pa, "_fetch_final_url", lambda url: self.TEAMS)
+        assert pa.propose_form_action("event-uuid") == "skipped_not_a_form"
+        assert not any("INSERT INTO actions" in sql for sql, _ in conn.executed)
+
+    def test_unresolvable_link_kept_fail_open(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def boom(url: str) -> str:
+            raise TimeoutError("no network")
+
+        conn = FakeConn(_script(None, links=["https://tinyurl.com/x"]))
+        monkeypatch.setattr(pa, "_engine_for_current_host",
+                            lambda: FakeEngine(conn))
+        monkeypatch.setattr(pa, "_fetch_final_url", boom)
+        assert pa.propose_form_action("event-uuid") == "proposed"
+
+    def test_meeting_non_form_skipped(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        conn = FakeConn(_script(None))
+        monkeypatch.setattr(pa, "_engine_for_current_host",
+                            lambda: FakeEngine(conn))
+        monkeypatch.setattr(pa, "_fetch_final_url", lambda url: self.TEAMS)
+        assert pa.propose_meeting_form_action("https://tinyurl.com/x") == (
+            "skipped_not_a_form")
+
+
 class TestMeetingProposal:
     """Listener entry (P13): a form link relayed from the Teams meeting chat
     becomes a draft carrying the caption-detected teacher/presenter names."""
