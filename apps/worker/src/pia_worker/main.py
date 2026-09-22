@@ -12,8 +12,9 @@ import redis as redis_lib
 import structlog
 from rq import Queue, SimpleWorker
 
+from pia_shared.queues import MAINTENANCE_QUEUE
 from pia_worker.jobs.demo import HEARTBEAT_KEY
-from pia_worker.queue import DEFAULT_QUEUE, MAINTENANCE_QUEUE, make_connection, make_queue
+from pia_worker.queue import make_connection, make_queue, parse_queue_names
 from pia_worker.settings import get_settings
 
 logger = structlog.get_logger()
@@ -43,12 +44,16 @@ def _maintenance_loop(client: redis_lib.Redis, interval_hours: int) -> None:
 
 
 def _deadline_sweep_loop(client: redis_lib.Redis, interval_minutes: int) -> None:
-    """F-020: hourly deadline state sweep (OPEN -> DUE_SOON -> EXPIRED)."""
+    """F-020: hourly deadline state sweep (OPEN -> DUE_SOON -> EXPIRED).
+
+    The failed-job watchdog rides the same hourly cadence: a DLQ digest, not
+    per-failure spam."""
     queue = Queue(MAINTENANCE_QUEUE, connection=client)
     interval = max(interval_minutes * 60, 60)
     while True:
         try:
             queue.enqueue("pia_worker.jobs.extract_events.deadline_state_sweep")
+            queue.enqueue("pia_worker.jobs.watchdog.scan_failed_jobs")
         except Exception:  # noqa: BLE001 — scheduler must never crash the worker
             logger.warning("deadline_sweep_enqueue_failed")
         time.sleep(interval)
@@ -106,6 +111,15 @@ def _reviewer_loop(client: redis_lib.Redis, hour: int, minute: int) -> None:
 
 def main() -> None:
     settings = get_settings()
+    # SEC-001: refuse to boot with placeholder/missing secrets.
+    from pia_shared.deploy import find_secret_problems
+
+    problems = find_secret_problems(
+        dashboard_token=None,  # worker serves no dashboard; skip token check
+        environment=settings.environment,
+        pia_encryption_key=settings.pia_encryption_key)
+    if problems:
+        raise RuntimeError("refusing to boot: " + "; ".join(problems))
     structlog.configure(
         processors=[
             structlog.processors.add_log_level,
@@ -162,10 +176,11 @@ def main() -> None:
     while True:
         try:
             connection = make_connection(settings.redis_url)
-            default_queue = make_queue(DEFAULT_QUEUE, connection=connection)
-            maintenance_queue = make_queue(MAINTENANCE_QUEUE, connection=connection)
-            logger.info("worker_started", environment=settings.environment)
-            worker = SimpleWorker([default_queue, maintenance_queue], connection=connection)
+            queues = [make_queue(name, connection=connection)
+                      for name in parse_queue_names(settings.worker_queues)]
+            logger.info("worker_started", environment=settings.environment,
+                        queues=settings.worker_queues)
+            worker = SimpleWorker(queues, connection=connection)
             worker.work(with_scheduler=False)
             logger.warning("worker_loop_returned")  # work() only returns on shutdown
         except Exception as exc:  # noqa: BLE001 — logged, then retried below

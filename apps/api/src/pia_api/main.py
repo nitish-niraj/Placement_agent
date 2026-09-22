@@ -26,6 +26,21 @@ def _configure_logging() -> None:
     )
 
 
+def _enforce_secrets() -> None:
+    """Startup gate (SEC-001): refuse to SERVE with placeholder/missing
+    secrets. Kept out of create_app() so importing the module (tests,
+    tooling) never needs a real .env — only serving does."""
+    from pia_shared.deploy import find_secret_problems
+
+    settings = get_settings()
+    problems = find_secret_problems(
+        dashboard_token=settings.dashboard_token,
+        environment=settings.environment,
+        pia_encryption_key=settings.pia_encryption_key)
+    if problems:
+        raise RuntimeError("refusing to serve: " + "; ".join(problems))
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
     _configure_logging()
@@ -61,6 +76,10 @@ def create_app() -> FastAPI:
             app.mount("/", StaticFiles(directory=str(candidate), html=True),
                       name="dashboard")
             break
+
+    @app.on_event("startup")
+    def _startup_secret_gate() -> None:
+        _enforce_secrets()
 
     return app
 

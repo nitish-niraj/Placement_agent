@@ -35,7 +35,8 @@ def test_rejects_wrong_token(client: TestClient) -> None:
 def test_fail_closed_without_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         "pia_api.settings._settings",
-        Settings(_env_file=None, evolution_webhook_secret=""),  # type: ignore[call-arg]
+        Settings(_env_file=None, evolution_webhook_secret="",  # type: ignore[call-arg]
+                 dashboard_token="t"),
     )
     client = TestClient(create_app())
     response = client.post(

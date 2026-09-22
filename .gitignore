@@ -18,8 +18,10 @@ dist/
 # Environment & secrets — NEVER commit (SEC-001)
 .env
 infrastructure/.env
+.env.backup*
 *.pem
 *.key
+*.log
 
 # Local data
 data/
