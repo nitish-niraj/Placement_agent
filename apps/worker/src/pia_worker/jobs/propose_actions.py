@@ -16,6 +16,7 @@ only path to real-world effect, behind its own ADR (SEC-005;
 ACTION_AUTOMATION_ENABLED stays false)."""
 
 import json
+import time
 import urllib.parse
 
 import httpx
@@ -31,6 +32,7 @@ logger = structlog.get_logger()
 _PROPOSABLE_TYPES = ("FORM", "KYC")
 _RETRYABLE_STATES = ("FAILED", "EXPIRED")  # only these may be re-proposed
 _RESOLVE_TIMEOUT_S = 10.0
+_RESOLVE_ATTEMPTS = 3  # transient DNS blips must not mint bogus drafts
 
 
 def _fetch_final_url(url: str) -> str:
@@ -50,10 +52,17 @@ def _canonicalize_form_link(url: str) -> str | None:
     parsed = urllib.parse.urlparse(url)
     if parsed.hostname == "docs.google.com" and parsed.path.startswith("/forms/"):
         return url
-    try:
-        final = _fetch_final_url(url)
-    except Exception as exc:  # noqa: BLE001 — transient: keep the raw link
-        logger.warning("form_link_unresolvable", url=url[:80], error=str(exc)[:120])
+    last_error: Exception | None = None
+    for attempt in range(_RESOLVE_ATTEMPTS):
+        try:
+            final = _fetch_final_url(url)
+            break
+        except Exception as exc:  # noqa: BLE001 — retry transients
+            last_error = exc
+            time.sleep(1.5 * (attempt + 1))
+    else:
+        logger.warning("form_link_unresolvable", url=url[:80],
+                       error=str(last_error)[:120])
         return url
     final_parsed = urllib.parse.urlparse(final)
     if (final_parsed.hostname == "docs.google.com"

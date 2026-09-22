@@ -131,6 +131,15 @@ class TestBuildUrl:
         url = prefill_mod.build_prefill_url(CANONICAL + "&entry.1=old", {"1": "new"})
         assert "entry.1=old" not in url and "entry.1=new" in url
 
+    def test_edit_requested_stripped(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            prefill_mod, "resolve_form_url",
+            lambda target: CANONICAL + "&edit_requested=true")
+        monkeypatch.setattr(prefill_mod, "fetch_form_html", lambda url: "")
+        report = prefill_mod.prefill_for_target("https://tinyurl.com/x", {})
+        assert "edit_requested" not in report["prefill_url"]
+        assert "embedded=true" in report["prefill_url"]
+
 
 class FakeResp:
     def __init__(self, url: str, status: int = 200, body: str = "") -> None:

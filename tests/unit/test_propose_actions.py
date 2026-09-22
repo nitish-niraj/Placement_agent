@@ -176,7 +176,32 @@ class TestLinkResolution:
         monkeypatch.setattr(pa, "_engine_for_current_host",
                             lambda: FakeEngine(conn))
         monkeypatch.setattr(pa, "_fetch_final_url", boom)
+        monkeypatch.setattr(pa.time, "sleep", lambda s: None)
         assert pa.propose_form_action("event-uuid") == "proposed"
+
+    def test_transient_blip_retried_then_canonicalized(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The 04:14 DNS blip minted a bogus draft: one failure must not
+        fall through to fail-open while retries remain."""
+        calls = {"n": 0}
+
+        def flaky(url: str) -> str:
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise TimeoutError("dns blip")
+            return TestLinkResolution.CANONICAL
+
+        conn = FakeConn(_script(None, links=["https://tinyurl.com/x"]))
+        monkeypatch.setattr(pa, "_engine_for_current_host",
+                            lambda: FakeEngine(conn))
+        monkeypatch.setattr(pa, "_fetch_final_url", flaky)
+        monkeypatch.setattr(pa.time, "sleep", lambda s: None)
+        assert pa.propose_form_action("event-uuid") == "proposed"
+        inserts = [p for sql, p in conn.executed
+                   if "INSERT INTO actions" in sql and p]
+        assert inserts[0]["target"] == TestLinkResolution.CANONICAL
+        assert calls["n"] == 3
 
     def test_meeting_non_form_skipped(
         self, monkeypatch: pytest.MonkeyPatch

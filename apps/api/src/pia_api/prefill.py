@@ -305,12 +305,26 @@ def build_prefill_url(base_url: str, filled: dict[str, str]) -> str:
          urllib.parse.urlencode(query), parts.fragment))
 
 
+def _without_edit_requested(url: str) -> str:
+    """Drafts are always fresh fills: an `edit_requested=true` link renders a
+    signed-in user an interstitial splash ("Fill out form" button — an extra
+    click, sometimes a new tab) instead of the questions. The plain viewform
+    is the fillable form, so drop that param everywhere we build links."""
+    parts = urllib.parse.urlsplit(url)
+    query = [(k, v) for k, v in
+             urllib.parse.parse_qsl(parts.query, keep_blank_values=True)
+             if k != "edit_requested"]
+    return urllib.parse.urlunsplit(
+        (parts.scheme, parts.netloc, parts.path,
+         urllib.parse.urlencode(query), parts.fragment))
+
+
 def prefill_for_target(target: str, bag: dict[str, str]) -> dict:
     """Full pipeline for one draft link. Returns a JSON-safe report (the URL
     itself is PII-bearing — callers must not log it). Zero entries (e.g. a
     login-walled form) is a report, not an error: the owner opens it manually
     (iframe shows Google sign-in under their own session)."""
-    canonical = resolve_form_url(target)
+    canonical = _without_edit_requested(resolve_form_url(target))
     entries = extract_entries(fetch_form_html(canonical))
     if not entries:
         return {"prefill_url": build_prefill_url(canonical, {}),

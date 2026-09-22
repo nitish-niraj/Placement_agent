@@ -91,7 +91,8 @@ export function Approvals() {
   const [openId, setOpenId] = useState<string | null>(null);
   const [preview, setPreview] = useState<PrefillPreview | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
-  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewError, setPreviewError] = useState<{ status: number | null;
+                                                     message: string } | null>(null);
 
   if (loading) return <Loading />;
   if (error || !data) return <ErrorNote message={error ?? "no data"} />;
@@ -119,7 +120,11 @@ export function Approvals() {
     try {
       setPreview(await api<PrefillPreview>(`/actions/${id}/prefill-url`));
     } catch (e) {
-      setPreviewError(e instanceof Error ? e.message : "could not build the pre-filled form");
+      const raw = e instanceof Error ? e.message : "could not build the pre-filled form";
+      const match = raw.match(/^(\d+):\s*([\s\S]*)$/);
+      setPreviewError(match
+        ? { status: Number(match[1]), message: match[2] || raw }
+        : { status: null, message: raw });
     } finally {
       setPreviewLoading(false);
     }
@@ -196,52 +201,92 @@ export function Approvals() {
 
       {openDraft && (
         <Card title={`Pre-filled form — ${openDraft.event?.company ?? openDraft.payload?.company ?? "General"}`} wide>
-          <p className="muted">
-            Review it, answer the blanks, then click Submit inside the form.
-          </p>
-          {openDraft.prefill && (
-            <p>
-              🔖{" "}
-              <a href={buildFillSnippet(openDraft.prefill)}
-                 title="Drag this link to your bookmarks bar">
-                PIA auto-fill (drag to bookmarks bar)
-              </a>
-              <br />
-              <span className="muted">
-                For login-walled forms the portal cannot pre-fill: open the
-                form (new-tab link below), click the bookmark on that page, and
-                it fills from your profile. File uploads and judgement answers
-                always stay manual.
-              </span>
-            </p>
-          )}
-          {previewLoading && <Loading />}
-          {previewError && <ErrorNote message={previewError} />}
-          {preview && (
-            <>
-              {preview.note && <p className="muted">{preview.note}</p>}
-              <div className="prefill-lists">
-                <div>
-                  <span className="muted">✓ Pre-filled ({preview.filled.length})</span>
-                  <ul>{preview.filled.map((f) => <li key={f.question}>{f.question}</li>)}</ul>
+          {(() => {
+            if (previewLoading) return <Loading />;
+            if (previewError) {
+              const notAForm = previewError.status === 422
+                && /teams meeting|not a form/i.test(previewError.message);
+              if (notAForm) {
+                return (
+                  <>
+                    <p>
+                      This link opens a <b>Teams meeting</b>, not a form — there
+                      is nothing to fill. It was filed as a draft by mistake.
+                    </p>
+                    <button className="secondary"
+                            disabled={busy === openDraft.id + "reject"}
+                            onClick={() => decide(openDraft.id, "reject")}>
+                      ✗ Dismiss draft
+                    </button>
+                  </>
+                );
+              }
+              return (
+                <>
+                  <ErrorNote message={previewError.message} />
+                  <p className="muted">
+                    <a href={openDraft.target} target="_blank" rel="noreferrer">
+                      Open the original link
+                    </a>{" · "}
+                    <button className="secondary"
+                            disabled={busy === openDraft.id + "reject"}
+                            onClick={() => decide(openDraft.id, "reject")}>
+                      ✗ Dismiss draft
+                    </button>
+                  </p>
+                </>
+              );
+            }
+            if (!preview) return null;
+            const prefilled = preview.filled.length > 0;
+            return (
+              <>
+                {prefilled && (
+                  <p className="muted">
+                    Review it, answer the blanks, then click Submit inside the form.
+                  </p>
+                )}
+                {!prefilled && (
+                  <>
+                    {preview.note && <p className="muted">{preview.note}</p>}
+                    {openDraft.prefill && (
+                      <p>
+                        🔖{" "}
+                        <a href={buildFillSnippet(openDraft.prefill)}
+                           title="Drag this link to your bookmarks bar">
+                          PIA auto-fill (drag to bookmarks bar)
+                        </a>
+                        <br />
+                        <span className="muted">
+                          The portal cannot read this form (sign-in wall): open it
+                          below, click the bookmark on the page, and it fills from
+                          your profile. File uploads and judgement answers stay manual.
+                        </span>
+                      </p>
+                    )}
+                  </>
+                )}
+                <div className="prefill-lists">
+                  <div>
+                    <span className="muted">✓ Pre-filled ({preview.filled.length})</span>
+                    <ul>{preview.filled.map((f) => <li key={f.question}>{f.question}</li>)}</ul>
+                  </div>
+                  <div>
+                    <span className="muted">✎ Answer yourself ({preview.left_blank.length})</span>
+                    <ul>{preview.left_blank.map((b) => (
+                      <li key={b.question}>{b.question} — {b.reason}</li>))}</ul>
+                  </div>
                 </div>
-                <div>
-                  <span className="muted">✎ Answer yourself ({preview.left_blank.length})</span>
-                  <ul>{preview.left_blank.map((b) => (
-                    <li key={b.question}>{b.question} — {b.reason}</li>))}</ul>
-                </div>
-              </div>
-              <iframe src={preview.prefill_url} title="Pre-filled Google Form"
-                      className="prefill-frame" />
-              <p className="muted">
-                Form not showing?{" "}
-                <a href={preview.prefill_url} target="_blank" rel="noreferrer">
-                  Open the pre-filled form in a new tab
-                </a>{" "}
-                (same link, sign-in works there).
-              </p>
-            </>
-          )}
+                <iframe src={preview.prefill_url} title="Pre-filled Google Form"
+                        className="prefill-frame" />
+                <p className="muted">
+                  <a href={preview.prefill_url} target="_blank" rel="noreferrer">
+                    ↗ Open in new tab
+                  </a>
+                </p>
+              </>
+            );
+          })()}
         </Card>
       )}
     </>
