@@ -20,6 +20,36 @@ class FormDriverError(RuntimeError):
     """The form could not be driven (structure unexpected, multi-page, ...)."""
 
 
+_WALL_NOTE = ("Google sign-in required — this form is restricted to signed-in "
+              "accounts and the robot has no Google session. "
+              "Fill it manually while signed in.")
+
+
+def login_wall_note(page) -> str | None:
+    """Detect a Google sign-in wall (org-restricted form): the headless
+    browser carries no Google session, so such forms render zero questions.
+    Returns a human-readable note for the Telegram report, or None when the
+    page looks like a real form. Never raises — detection must not fail a run
+    (spacing-tolerant: the sign-in DOM concatenates words without spaces)."""
+    try:
+        url = page.url or ""
+    except Exception:  # noqa: BLE001 — detached/closed page
+        return None
+    if "accounts.google.com" in url:
+        return _WALL_NOTE
+    try:
+        title = (page.title() or "").lower()
+        body = (page.locator("body").text_content() or "").lower()
+    except Exception:  # noqa: BLE001 — DOM unreadable, let read_questions decide
+        return None
+    if "google forms" in title and "sign-in" in title:
+        return _WALL_NOTE
+    compact = re.sub(r"[^a-z0-9]+", "", body)
+    if "signintocontinuetogoogleforms" in compact:
+        return _WALL_NOTE
+    return None
+
+
 def read_questions(page) -> list[Question]:
     """Every question on the page: text (star stripped), kind, required flag,
     and its global listitem position (fill uses the same index later)."""

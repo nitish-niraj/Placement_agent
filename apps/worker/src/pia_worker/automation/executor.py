@@ -33,7 +33,8 @@ from pia_worker.teams.listener import _telegram_send
 
 logger = structlog.get_logger()
 
-_SENSITIVE = ("roll_number", "registration_number", "student_id")
+_SENSITIVE = ("roll_number", "registration_number", "student_id",
+                "mobile_number")
 
 
 def _read_prefill(engine) -> dict | None:
@@ -42,7 +43,7 @@ def _read_prefill(engine) -> dict | None:
         row = conn.execute(
             sqlalchemy.text(
                 "SELECT p.canonical_name, p.roll_number, p.registration_number, "
-                "p.student_id, p.branch, p.batch, p.cgpa, "
+                "p.student_id, p.mobile_number, p.branch, p.batch, p.cgpa, "
                 "p.tenth_percent, p.twelfth_percent, p.backlog_count, u.email "
                 "FROM candidate_profiles p JOIN users u ON u.id = p.user_id LIMIT 1"
             )
@@ -53,6 +54,8 @@ def _read_prefill(engine) -> dict | None:
     secret = get_settings().pia_encryption_key
     for field in _SENSITIVE:
         data[field] = decrypt(data[field], secret)
+    # Value-bag keys follow the catalog ("mobile"), not column names.
+    data["mobile"] = data.pop("mobile_number")
     return data
 
 
@@ -110,6 +113,12 @@ def _run_form(form_url: str, bag: dict[str, str], submit_allowed: bool) -> dict:
         page = browser.new_page()
         try:
             page.goto(form_url, timeout=30000, wait_until="domcontentloaded")
+            wall = gform.login_wall_note(page)
+            if wall is not None:
+                report["note"] = wall
+                report["screenshot"] = page.screenshot(full_page=True)
+                logger.warning("form_login_wall", form_url=form_url[:80])
+                return report
             questions = gform.read_questions(page)
             by_index = {q.index: q for q in questions}
             decisions = fields.decide_fills(
