@@ -101,7 +101,8 @@ class TestList:
                     "roll_number": "12515641", "registration_number": None,
                     "student_id": None, "branch": "CSE", "batch": "2023-2027",
                     "cgpa": 7.9, "tenth_percent": 88.0, "twelfth_percent": 84.0,
-                    "backlog_count": 0, "display_name": "Nitish Kumar"})
+                    "backlog_count": 0, "display_name": "Nitish Kumar",
+                    "mobile_number": None})
             return FakeResult()
 
         _wire(monkeypatch, script)

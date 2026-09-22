@@ -1,4 +1,5 @@
-import { useApi } from "../api";
+import { useState } from "react";
+import { post, useApi } from "../api";
 import { fmt } from "../ui";
 import { Card, ErrorNote, Loading, Table } from "../ui";
 
@@ -10,12 +11,33 @@ interface Profile {
 }
 
 export function Profile() {
-  const { data, error, loading } = useApi<Profile>("/profile");
+  const { data, error, loading, reload } = useApi<Profile>("/profile");
+  const [mobile, setMobile] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState<string | null>(null);
   if (loading) return <Loading />;
   if (error || !data) return <ErrorNote message={error ?? "no data"} />;
   const p = data.profile as Record<string, string | number | null>;
   const fields = ["canonical_name", "registration_number", "roll_number", "student_id",
-                  "branch", "batch", "cgpa", "backlog_count"];
+                  "mobile_number", "branch", "batch", "cgpa", "backlog_count"];
+
+  const saveMobile = async () => {
+    const value = mobile.trim();
+    if (!value) return;
+    setSaving(true);
+    setSaved(null);
+    try {
+      await post("/profile", { mobile_number: value });
+      setSaved("✓ saved — forms will pre-fill it from now on");
+      setMobile("");
+      reload();
+    } catch (e) {
+      setSaved(e instanceof Error ? e.message : "save failed");
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <>
       <Card title="Candidate profile (SEC-002: sensitive fields encrypted at rest)" wide>
@@ -23,6 +45,17 @@ export function Profile() {
           head={["Field", "Value"]}
           rows={fields.map((f) => [f, p[f] === null || p[f] === undefined ? "—" : String(p[f])])}
         />
+        <p className="muted">
+          Mobile number{" "}
+          <input placeholder={p.mobile_number ? String(p.mobile_number) : "10-digit mobile"}
+                 value={mobile} onChange={(e) => setMobile(e.target.value)}
+                 onKeyDown={(e) => e.key === "Enter" && saveMobile()}
+                 style={{ width: "180px", margin: "0 6px" }} />{" "}
+          <button disabled={saving || !mobile.trim()} onClick={saveMobile}>
+            {saving ? "Saving…" : "Save mobile"}
+          </button>{" "}
+          {saved && <span className="muted">{saved}</span>}
+        </p>
       </Card>
       <Card title="Identity aliases (FR-PRO-002)" wide>
         <Table

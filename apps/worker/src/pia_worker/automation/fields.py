@@ -30,6 +30,7 @@ logger = structlog.get_logger()
 VALUE_CATALOG: dict[str, str] = {
     "full_name": "the student's full name",
     "email": "the student's email address",
+    "mobile": "the student's mobile/phone number",
     "registration_number": "the student's university registration number",
     "roll_number": "the student's roll number",
     "student_id": "the student's student ID",
@@ -58,6 +59,8 @@ _HINTS: list[tuple[str, re.Pattern[str]]] = [
     ("roll_number", re.compile(r"\broll\b", re.IGNORECASE)),
     ("student_id", re.compile(r"\b(student\s*id|scholar\s*(no|number)|uid)\b", re.IGNORECASE)),
     ("email", re.compile(r"\be-?mail\b", re.IGNORECASE)),
+    ("mobile", re.compile(r"\b(mobile|phone|contact\s*(no|number)|tel\.?)\b",
+                          re.IGNORECASE)),
     ("backlog_count", re.compile(r"\b(backlogs?|arrears?)\b", re.IGNORECASE)),
     ("cgpa", re.compile(r"\b(cgpa|sgpa)\b", re.IGNORECASE)),
     ("tenth_percent", re.compile(r"\b(10th|x(th)?\s*class|matric)\b", re.IGNORECASE)),

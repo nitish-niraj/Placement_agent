@@ -39,6 +39,8 @@ class TestHints:
         assert F.map_hint("Company name", bag) == "company"
         assert F.map_hint("Your good name", bag) == "full_name"
         assert F.map_hint("Email address", bag) == "email"
+        assert F.map_hint("Mobile No", bag) == "mobile"
+        assert F.map_hint("Contact number", bag) == "mobile"
         assert F.map_hint("Course / Branch", bag) == "branch"
 
     def test_unmappable_question_has_no_hint(self) -> None:

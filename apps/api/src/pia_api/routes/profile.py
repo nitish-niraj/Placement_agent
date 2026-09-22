@@ -24,7 +24,8 @@ router = APIRouter(
     prefix="/api/v1", tags=["profile"], dependencies=[Depends(require_dashboard_token)]
 )
 
-SENSITIVE_FIELDS = ("roll_number", "registration_number", "student_id")
+SENSITIVE_FIELDS = ("roll_number", "registration_number", "student_id",
+                      "mobile_number")
 
 PROFILE_UPSERT_SQL = sqlalchemy.text(
     "UPDATE candidate_profiles SET "
@@ -32,6 +33,7 @@ PROFILE_UPSERT_SQL = sqlalchemy.text(
     "roll_number = COALESCE(:roll_number, roll_number), "
     "registration_number = COALESCE(:registration_number, registration_number), "
     "student_id = COALESCE(:student_id, student_id), "
+    "mobile_number = COALESCE(:mobile_number, mobile_number), "
     "branch = COALESCE(:branch, branch), "
     "batch = COALESCE(:batch, batch), "
     "cgpa = COALESCE(:cgpa, cgpa), "
@@ -49,6 +51,7 @@ class ProfileUpdate(BaseModel):
     roll_number: str | None = None
     registration_number: str | None = None
     student_id: str | None = None
+    mobile_number: str | None = None
     branch: str | None = None
     batch: str | None = None
     cgpa: float | None = Field(default=None, ge=0, le=10)
@@ -92,7 +95,8 @@ def get_profile() -> dict:
         row = conn.execute(
             sqlalchemy.text(
                 "SELECT p.id, p.user_id, u.display_name, u.email, p.canonical_name, "
-                "p.roll_number, p.registration_number, p.student_id, p.branch, p.batch, "
+                "p.roll_number, p.registration_number, p.student_id, p.mobile_number, "
+                "p.branch, p.batch, "
                 "p.cgpa, p.tenth_percent, p.twelfth_percent, p.backlog_count, "
                 "p.other_attributes FROM candidate_profiles p "
                 "JOIN users u ON u.id = p.user_id LIMIT 1"
@@ -138,8 +142,8 @@ def update_profile(payload: ProfileUpdate) -> dict:
     with engine.begin() as conn:
         # All bind params must exist (None = keep current value via COALESCE)
         fields = ["canonical_name", "roll_number", "registration_number",
-                  "student_id", "branch", "batch", "cgpa", "tenth_percent",
-                  "twelfth_percent", "backlog_count"]
+                  "student_id", "mobile_number", "branch", "batch", "cgpa",
+                  "tenth_percent", "twelfth_percent", "backlog_count"]
         params = {f: changes.get(f) for f in fields}
         for field in SENSITIVE_FIELDS:  # SEC-002: encrypt sensitive fields at rest
             if params.get(field) is not None:
