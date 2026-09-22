@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { post, useApi } from "../api";
+import { api, post, useApi } from "../api";
+import { buildFillSnippet } from "../fillSnippet";
 import { fmt } from "../ui";
 import { Badge, Card, ErrorNote, Loading, Table } from "../ui";
 
@@ -28,8 +29,16 @@ interface ActionsResponse {
   actions: ActionRow[];
 }
 
+interface PrefillPreview {
+  prefill_url: string;
+  source_url: string;
+  filled: { question: string }[];
+  left_blank: { question: string; reason: string }[];
+  note: string;
+}
+
 const PREFILL_LABELS: Record<string, string> = {
-  full_name: "Full name", email: "Email", roll_number: "Roll no.",
+  full_name: "Full name", email: "Email", mobile: "Mobile", roll_number: "Roll no.",
   registration_number: "Registration no.", student_id: "Student ID",
   branch: "Branch", batch: "Batch", cgpa: "CGPA",
   tenth_percent: "10th %", twelfth_percent: "12th %", backlog_count: "Backlogs",
@@ -52,9 +61,7 @@ function willDo(a: ActionRow): string {
     case "data_quality":
       return `re-run the event parser on message ${(a.payload?.reparse_message_id ?? "").slice(0, 8)}`;
     case "form_draft":
-      return a.payload && (a.payload as { source?: string }).source === "teams_meeting_chat"
-        ? "submit this form (feedback form)"
-        : "submit this form after your approval";
+      return "open a pre-filled form below for you to review and Submit";
     default:
       return "run the approved executor";
   }
@@ -81,6 +88,10 @@ function PrefillDetails({ prefill }: { prefill: Record<string, string | number |
 export function Approvals() {
   const { data, error, loading, reload } = useApi<ActionsResponse>("/actions");
   const [busy, setBusy] = useState<string | null>(null);
+  const [openId, setOpenId] = useState<string | null>(null);
+  const [preview, setPreview] = useState<PrefillPreview | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
 
   if (loading) return <Loading />;
   if (error || !data) return <ErrorNote message={error ?? "no data"} />;
@@ -92,11 +103,29 @@ export function Approvals() {
     setBusy(id + decision);
     try {
       await post(`/actions/${id}/${decision}`, {});
+      if (openId === id) setOpenId(null);
       reload();
     } finally {
       setBusy(null);
     }
   };
+
+  const togglePreview = async (id: string) => {
+    if (openId === id) { setOpenId(null); return; }
+    setOpenId(id);
+    setPreview(null);
+    setPreviewError(null);
+    setPreviewLoading(true);
+    try {
+      setPreview(await api<PrefillPreview>(`/actions/${id}/prefill-url`));
+    } catch (e) {
+      setPreviewError(e instanceof Error ? e.message : "could not build the pre-filled form");
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  const openDraft = openId ? data.actions.find((a) => a.id === openId) ?? null : null;
 
   return (
     <>
@@ -126,6 +155,12 @@ export function Approvals() {
                       onClick={() => decide(a.id, "approve")}>✓ Approve</button>
               <button className="secondary" disabled={busy === a.id + "reject"}
                       onClick={() => decide(a.id, "reject")}>✗ Reject</button>
+              {a.type === "form_draft" && (
+                <button className="secondary" disabled={previewLoading && openId === a.id}
+                        onClick={() => togglePreview(a.id)}>
+                  {openId === a.id ? "▲ Hide form" : "📝 Fill & preview"}
+                </button>
+              )}
             </span>,
           ])}
         />
@@ -134,7 +169,7 @@ export function Approvals() {
 
       <Card title="Recent decisions" wide>
         <Table
-          head={["Updated", "Type", "Form", "Status"]}
+          head={["Updated", "Type", "Form", "Status", "Preview"]}
           rows={decided.map((a) => [
             fmt(a.updated_at),
             a.type,
@@ -142,15 +177,73 @@ export function Approvals() {
               {a.target.length > 60 ? a.target.slice(0, 60) + "…" : a.target}
             </a>,
             <Badge key="s" kind="action" value={a.status} />,
+            a.type === "form_draft" ? (
+              <button key="v" className="secondary"
+                      disabled={previewLoading && openId === a.id}
+                      onClick={() => togglePreview(a.id)}>
+                {openId === a.id ? "▲ Hide form" : "📝 Fill & preview"}
+              </button>
+            ) : "—",
           ])}
         />
         {decided.length === 0 && <p className="muted">No decided drafts yet.</p>}
         <p className="muted">
-          Approving hands the draft to its executor — forms submit via the
-          Stage 3 robot, reviewer proposals run their approved action. Every
-          run is audited.
+          Approving records your decision (audited). Forms are never submitted
+          by the portal — you click Submit inside the pre-filled form above.
+          Reviewer proposals run their approved action via the Stage 3 executor.
         </p>
       </Card>
+
+      {openDraft && (
+        <Card title={`Pre-filled form — ${openDraft.event?.company ?? openDraft.payload?.company ?? "General"}`} wide>
+          <p className="muted">
+            Review it, answer the blanks, then click Submit inside the form.
+          </p>
+          {openDraft.prefill && (
+            <p>
+              🔖{" "}
+              <a href={buildFillSnippet(openDraft.prefill)}
+                 title="Drag this link to your bookmarks bar">
+                PIA auto-fill (drag to bookmarks bar)
+              </a>
+              <br />
+              <span className="muted">
+                For login-walled forms the portal cannot pre-fill: open the
+                form (new-tab link below), click the bookmark on that page, and
+                it fills from your profile. File uploads and judgement answers
+                always stay manual.
+              </span>
+            </p>
+          )}
+          {previewLoading && <Loading />}
+          {previewError && <ErrorNote message={previewError} />}
+          {preview && (
+            <>
+              {preview.note && <p className="muted">{preview.note}</p>}
+              <div className="prefill-lists">
+                <div>
+                  <span className="muted">✓ Pre-filled ({preview.filled.length})</span>
+                  <ul>{preview.filled.map((f) => <li key={f.question}>{f.question}</li>)}</ul>
+                </div>
+                <div>
+                  <span className="muted">✎ Answer yourself ({preview.left_blank.length})</span>
+                  <ul>{preview.left_blank.map((b) => (
+                    <li key={b.question}>{b.question} — {b.reason}</li>))}</ul>
+                </div>
+              </div>
+              <iframe src={preview.prefill_url} title="Pre-filled Google Form"
+                      className="prefill-frame" />
+              <p className="muted">
+                Form not showing?{" "}
+                <a href={preview.prefill_url} target="_blank" rel="noreferrer">
+                  Open the pre-filled form in a new tab
+                </a>{" "}
+                (same link, sign-in works there).
+              </p>
+            </>
+          )}
+        </Card>
+      )}
     </>
   );
 }

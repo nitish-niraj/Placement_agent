@@ -25,7 +25,8 @@ router = APIRouter(
     prefix="/api/v1", tags=["actions"], dependencies=[Depends(require_dashboard_token)]
 )
 
-_SENSITIVE = ("roll_number", "registration_number", "student_id")
+_SENSITIVE = ("roll_number", "registration_number", "student_id",
+                "mobile_number")
 
 
 def _audit(
@@ -46,7 +47,8 @@ def _prefill(conn: sqlalchemy.Connection) -> dict | None:
     row = conn.execute(
         sqlalchemy.text(
             "SELECT p.canonical_name, p.roll_number, p.registration_number, "
-            "p.student_id, p.branch, p.batch, p.cgpa, p.tenth_percent, "
+            "p.student_id, p.mobile_number, p.branch, p.batch, p.cgpa, "
+            "p.tenth_percent, "
             "p.twelfth_percent, p.backlog_count, u.display_name, u.email "
             "FROM candidate_profiles p JOIN users u ON u.id = p.user_id LIMIT 1"
         )
@@ -65,6 +67,7 @@ def _prefill(conn: sqlalchemy.Connection) -> dict | None:
         "roll_number": data["roll_number"],
         "registration_number": data["registration_number"],
         "student_id": data["student_id"],
+        "mobile": data["mobile_number"],
         "branch": data["branch"],
         "batch": data["batch"],
         "cgpa": data["cgpa"],
@@ -128,6 +131,39 @@ def list_actions(
     return {"actions": [_render(r, prefill) for r in rows]}
 
 
+@router.get("/actions/{action_id}/prefill-url")
+def prefill_url(action_id: str) -> dict:
+    """Inline pre-fill link for a form_draft (owner decision 2026-09-21): the
+    dashboard embeds this URL so the owner reviews and submits in their own
+    browser. Read-only — no state change, no audit — and the URL carries PII
+    so it is never logged."""
+    from pia_api import prefill as prefill_mod
+
+    engine = get_engine()
+    with engine.connect() as conn:
+        row = _load_action(conn, action_id)
+        if row["type"] != "form_draft":
+            raise HTTPException(status_code=422,
+                                detail="only form drafts have pre-fill links")
+        values = _prefill(conn) or {}
+        payload = row["payload"] or {}
+    bag: dict[str, str] = {k: str(v).strip() for k, v in values.items()
+                           if v is not None and str(v).strip()}
+    company = str(payload.get("company") or "").strip()
+    if company and company.lower() != "none":
+        bag["company"] = company
+    presenters = [p for p in (payload.get("presenters") or []) if str(p).strip()]
+    if presenters:
+        bag["teacher"] = str(presenters[0]).strip()
+    target = str(payload.get("form_url") or row["target"] or "")
+    if not target:
+        raise HTTPException(status_code=422, detail="draft has no form link")
+    try:
+        return prefill_mod.prefill_for_target(target, bag)
+    except prefill_mod.PrefillError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+
 def _decide(action_id: str, to_status: ActionStatus) -> dict:
     engine = get_engine()
     with engine.begin() as conn:
@@ -154,26 +190,20 @@ def _decide(action_id: str, to_status: ActionStatus) -> dict:
 
 @router.post("/actions/{action_id}/approve")
 def approve_action(action_id: str) -> dict:
-    """WAITING_APPROVAL -> APPROVED. With FORM_AUTOMATION_ENABLED on (ADR-012)
-    the approved draft is immediately handed to the P14.1 submit executor
-    (which still honors FORM_SUBMIT_DRY_RUN); with it off, approval is
-    terminal and recorded for the executor to consume later."""
+    """WAITING_APPROVAL -> APPROVED. Manual Submit only (owner decision
+    2026-09-21): approval records the decision (audited) — the owner submits
+    in the embedded pre-filled form, so form_draft approval never enqueues
+    the headless robot. Reviewer proposals still hand to their executor behind
+    the Stage 3 switch."""
     result = _decide(action_id, ActionStatus.APPROVED)
     from pia_api.settings import get_settings
 
-    # Stage 3 (ADR-012/013): an approval hands the draft to its executor —
-    # the form robot for form_draft, the proposal executors for reviewer
-    # types — but only when the per-capability switch is on.
+    # Stage 3 (ADR-013): an approval hands a reviewer proposal to its executor
+    # when the per-capability switch is on. Form drafts are excluded by design.
     executables = {"deadline_nudge", "kyc_reminder", "follow_up",
                    "verify_field", "data_quality"}
     try:
-        is_form = result.get("type") == "form_draft"
-        is_proposal = result.get("type") in executables
-        if is_form and get_settings().form_automation_enabled:
-            from pia_api.jobs import enqueue_form_submit
-
-            enqueue_form_submit(action_id)
-        elif is_proposal and get_settings().stage3_executors_enabled:
+        if result.get("type") in executables and get_settings().stage3_executors_enabled:
             from pia_api.jobs import enqueue_proposal_executor
 
             enqueue_proposal_executor(action_id)

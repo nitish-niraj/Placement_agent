@@ -20,7 +20,15 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     window.location.hash = "#/login";
     throw new Error("unauthorized");
   }
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    let detail = "";
+    try {
+      detail = (await res.json()).detail ?? "";
+    } catch {
+      detail = "";
+    }
+    throw new Error(detail ? `${res.status}: ${detail}` : `${res.status} ${res.statusText}`);
+  }
   return (await res.json()) as T;
 }
 
