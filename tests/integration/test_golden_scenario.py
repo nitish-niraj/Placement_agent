@@ -48,7 +48,8 @@ IST = ZoneInfo("Asia/Kolkata")
 class StubChannel:
     sent: list[str] = []
 
-    def send(self, chat_id: str, text: str) -> DeliveryResult:
+    def send(self, chat_id: str, text: str,
+             reply_markup: dict | None = None) -> DeliveryResult:
         StubChannel.sent.append(text)
         return DeliveryResult(True, "stub")
 

@@ -91,6 +91,23 @@ class MatchMethod(StrEnum):
     MODEL_REVIEW = "MODEL_REVIEW"
 
 
+class ApplicationStatus(StrEnum):
+    """Did the student actually apply for this company+role opportunity?
+
+    List-membership (EligibilityState) is NOT application: a name on a CSV
+    never implies APPLIED. Every transition is user-driven (Telegram buttons,
+    dashboard, or explicit text) — the pipeline only ever creates
+    UNKNOWN / ELIGIBLE_NOT_APPLIED rows, never APPLIED.
+    """
+
+    UNKNOWN = "UNKNOWN"
+    ELIGIBLE_NOT_APPLIED = "ELIGIBLE_NOT_APPLIED"
+    APPLIED = "APPLIED"
+    NOT_APPLIED = "NOT_APPLIED"
+    NOT_SURE = "NOT_SURE"
+    NOT_INTERESTED = "NOT_INTERESTED"
+
+
 class CompanyWatch(StrEnum):
     NONE = "NONE"
     WATCHING = "WATCHING"

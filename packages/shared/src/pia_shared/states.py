@@ -10,6 +10,7 @@ not by DB triggers. Two invariants carry safety weight:
 
 from pia_shared.enums import (
     ActionStatus,
+    ApplicationStatus,
     CompanyLifecycle,
     DeadlineState,
     EligibilityState,
@@ -19,7 +20,7 @@ from pia_shared.enums import (
 
 State = (
     MessageState | EligibilityState | EventStatus | DeadlineState | ActionStatus
-    | CompanyLifecycle
+    | CompanyLifecycle | ApplicationStatus
 )
 
 
@@ -171,6 +172,15 @@ COMPANY_LIFECYCLE_TRANSITIONS: dict[CompanyLifecycle, set[CompanyLifecycle]] = {
     CompanyLifecycle.REJECTED: set(),
 }
 
+# Application state (company+role opportunity): every transition is an
+# explicit user decision (Telegram button / dashboard / stated text), so the
+# machine is fully connected — the pipeline only CREATES rows (UNKNOWN or
+# ELIGIBLE_NOT_APPLIED) and never moves them toward APPLIED on its own.
+_ALL_APPLICATION_STATUSES = frozenset(ApplicationStatus)
+APPLICATION_TRANSITIONS: dict[ApplicationStatus, set[ApplicationStatus]] = {
+    status: set(_ALL_APPLICATION_STATUSES) for status in ApplicationStatus
+}
+
 _MACHINES: dict[str, dict] = {
     "message": MESSAGE_TRANSITIONS,
     "eligibility": ELIGIBILITY_TRANSITIONS,
@@ -178,6 +188,7 @@ _MACHINES: dict[str, dict] = {
     "deadline": DEADLINE_TRANSITIONS,
     "action": ACTION_TRANSITIONS,
     "company_lifecycle": COMPANY_LIFECYCLE_TRANSITIONS,
+    "application": APPLICATION_TRANSITIONS,
 }
 
 

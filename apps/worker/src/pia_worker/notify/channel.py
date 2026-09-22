@@ -29,7 +29,8 @@ class DeliveryResult:
 
 
 class NotificationChannel:
-    def send(self, chat_id: str, text: str) -> DeliveryResult:
+    def send(self, chat_id: str, text: str,
+             reply_markup: dict | None = None) -> DeliveryResult:
         raise NotImplementedError  # interface only (DEC-002)
 
 
@@ -40,7 +41,17 @@ class TelegramChannel(NotificationChannel):
         self._timeout = timeout_seconds
         self._client = client  # injectable for tests
 
-    def send(self, chat_id: str, text: str) -> DeliveryResult:
+    def _payload(self, chat_id: str, text: str,
+                 reply_markup: dict | None) -> dict:
+        body: dict = {"chat_id": chat_id, "text": text,
+                      "parse_mode": "HTML",
+                      "disable_web_page_preview": True}
+        if reply_markup is not None:
+            body["reply_markup"] = reply_markup
+        return body
+
+    def send(self, chat_id: str, text: str,
+             reply_markup: dict | None = None) -> DeliveryResult:
         if not self._token:
             raise DeliveryError("TELEGRAM_BOT_TOKEN not configured")
         if not chat_id:
@@ -49,17 +60,13 @@ class TelegramChannel(NotificationChannel):
             if self._client is not None:
                 response = self._client.post(
                     f"{TELEGRAM_API}/bot{self._token}/sendMessage",
-                    json={"chat_id": chat_id, "text": text,
-                          "parse_mode": "HTML",
-                          "disable_web_page_preview": True},
+                    json=self._payload(chat_id, text, reply_markup),
                     timeout=self._timeout,
                 )
             else:
                 response = httpx.post(
                     f"{TELEGRAM_API}/bot{self._token}/sendMessage",
-                    json={"chat_id": chat_id, "text": text,
-                          "parse_mode": "HTML",
-                          "disable_web_page_preview": True},
+                    json=self._payload(chat_id, text, reply_markup),
                     timeout=self._timeout,
                 )
         except httpx.HTTPError as exc:

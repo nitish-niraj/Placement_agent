@@ -164,6 +164,31 @@ def render_eligibility_alert(
     return RenderedAlert(alert.text, evidence)
 
 
+def render_ask_applied(
+    *, company: str | None, role: str | None, event_type: str,
+    context_line: str | None = None,
+) -> RenderedAlert:
+    """Ask-whether-applied nudge: the student is eligible (or a post-application
+    message arrived) but the application state is undecided. Sent with the
+    ask_applied_keyboard — the answer persists the opportunity state."""
+    role_line = f" for <b>{html.escape(role)}</b>" if role else ""
+    alert = _e(
+        NotificationPriority.MEDIUM,
+        f"{company or 'General'} — Application check",
+        f"You are eligible{role_line} and an application-related update "
+        f"arrived ({event_type.replace('_', ' ').title()}).",
+        "Future updates can only become follow-ups once the system knows "
+        "whether you applied — a company mention alone is never proof.",
+        "n/a",
+        "Tap a button below: have you applied for this role?",
+        context_line or "application-state check",
+        None,
+    )
+    evidence = [{"kind": "application_check",
+                 "ref": f"{company or ''}|{role or ''}"}]
+    return RenderedAlert(alert.text, evidence)
+
+
 def render_reminder(
     *, priority: NotificationPriority, company: str | None, event_type: str,
     due_at: datetime, window_hours: int,

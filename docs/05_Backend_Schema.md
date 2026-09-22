@@ -46,6 +46,9 @@ CREATE TYPE notification_status AS ENUM ('PENDING','QUEUED','SENT','FAILED','PEN
 CREATE TYPE memory_scope AS ENUM ('COMPANY','EVENT','PROFILE','GROUP','GENERAL');
 CREATE TYPE action_status AS ENUM ('PROPOSED','WAITING_APPROVAL','APPROVED','EXECUTING','SUCCEEDED','REJECTED','EXPIRED','FAILED'); -- §10.4 (future)
 CREATE TYPE job_state AS ENUM ('QUEUED','STARTED','RETRYING','SUCCEEDED','FAILED','DEAD_LETTERED');
+-- DEC-011 application status lives in Python (pia_shared.enums) + a TEXT/CHECK
+-- column on application_states (no PG enum): UNKNOWN, ELIGIBLE_NOT_APPLIED,
+-- APPLIED, NOT_APPLIED, NOT_SURE, NOT_INTERESTED — fully user-driven machine.
 ```
 
 **Allowed transitions (enforced in the state-transition layer, validated by tests — not DB triggers):**
@@ -258,6 +261,29 @@ CREATE TABLE eligibility_records (       -- FR-ELG-008/009, FR-MEM-002, §10.2
 );
 CREATE INDEX idx_eligibility_user_company ON eligibility_records (user_id, company_id, detected_at DESC);  -- GET /eligibility, FR-NOT-001
 CREATE INDEX idx_eligibility_review ON eligibility_records (requires_user_review) WHERE requires_user_review;
+
+-- DEC-011: application state is NOT eligibility. eligibility_records says
+-- "the student's name is on the list"; application_states says "the student
+-- applied" (their own answer per company+role). Migration 20260922_0001.
+CREATE TABLE application_states (
+  id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id          uuid NOT NULL REFERENCES users(id),
+  company_id       uuid NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+  role_normalized  text NOT NULL DEFAULT '',   -- normalized designation; '' = company-level
+  opportunity_key  text NOT NULL,              -- company_norm|role_norm (callback + dedup key)
+  status           text NOT NULL DEFAULT 'UNKNOWN'
+                     CHECK (status IN ('UNKNOWN','ELIGIBLE_NOT_APPLIED','APPLIED',
+                                       'NOT_APPLIED','NOT_SURE','NOT_INTERESTED')),
+  applied_at       timestamptz,                -- stamped exactly on -> APPLIED
+  source           text NOT NULL DEFAULT '',   -- telegram:button | dashboard | ask_nudge | eligibility
+  note             text NOT NULL DEFAULT '',
+  created_at/updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (user_id, company_id, role_normalized)
+);
+CREATE INDEX idx_application_states_opportunity ON application_states (opportunity_key);
+CREATE INDEX idx_application_states_company ON application_states (company_id);
+-- Machine: fully user-driven (any -> any, "application"); the pipeline only
+-- creates UNKNOWN / ELIGIBLE_NOT_APPLIED rows, never APPLIED. Every change audited.
 ```
 
 ### 3.6 Events, updates, deadlines

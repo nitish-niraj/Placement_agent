@@ -7,6 +7,7 @@ events skip. The payload must carry references only — no decrypted PII."""
 
 import contextlib
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,9 +17,10 @@ FORM_URL = "https://docs.google.com/forms/d/e/ABC123/viewform"
 
 
 class FakeResult:
-    def __init__(self, value=None, mapping=None):
+    def __init__(self, value=None, mapping=None, mapping_list=None):
         self._value = value
         self._mapping = mapping
+        self._list = mapping_list if mapping_list is not None else []
 
     def scalar(self):
         return self._value
@@ -28,6 +30,9 @@ class FakeResult:
 
     def first(self):
         return self._mapping
+
+    def all(self):
+        return self._list
 
 
 class FakeConn:
@@ -53,15 +58,29 @@ class FakeEngine:
 
 
 def _script(existing_status: str | None, event_type: str = "FORM",
-            links: list[str] | None = None):
+            links: list[str] | None = None, excerpt: str = "",
+            designation: str | None = None,
+            extraction_payloads: list | None = None,
+            app_row: dict | None = "default"):
     links = [FORM_URL] if links is None else links
+    payload = {"links": links, "excerpt": excerpt,
+               "designation": designation, "source_message_id": "msg-1"}
 
     def script(sql: str, _params: dict | None = None) -> FakeResult:
         if "FROM events e" in sql:
             return FakeResult(mapping={"type": event_type, "company": "SOFTLINK",
+                                       "company_id": "comp-uuid",
+                                       "current_payload": dict(payload),
                                        "links": links})
+        if "FROM document_extractions" in sql:
+            return FakeResult(mapping_list=extraction_payloads or [])
         if "FROM users" in sql:
-            return FakeResult(value="user-uuid")
+            return FakeResult(value="user-uuid",
+                              mapping=SimpleNamespace(id="user-uuid"))
+        if "FROM application_states" in sql:
+            if app_row == "default":
+                return FakeResult(mapping=None)  # no tracked row (UNKNOWN)
+            return FakeResult(mapping=app_row)
         if "FROM actions WHERE target" in sql:
             return FakeResult(value=existing_status)
         if "INSERT INTO actions" in sql:
@@ -271,3 +290,66 @@ class TestMeetingProposal:
     def test_idempotent_per_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._run(monkeypatch, existing="WAITING_APPROVAL")
         assert pa.propose_meeting_form_action(FORM_URL) == "already_proposed"
+
+
+def _app_row(status: str) -> dict:
+    return {"id": "app-uuid", "status": status, "applied_at": None,
+            "source": "test", "note": "", "opportunity_key": "softlink|",
+            "updated_at": None}
+
+
+def _list_payload() -> list:
+    return [{"structured_payload": {"detection": {"is_candidate_list": True}}}]
+
+
+class TestApplicationGates:
+    """Company mentioned != applied: the strict list gate and the negative
+    application answer both skip the draft; undecided/APPLIED still propose."""
+
+    def _run_gate(self, monkeypatch: pytest.MonkeyPatch, **kwargs) -> None:
+        conn = FakeConn(_script(None, **kwargs))
+        monkeypatch.setattr(pa, "_engine_for_current_host",
+                            lambda: FakeEngine(conn))
+
+    def test_csv_without_name_skips_draft(self,
+                                         monkeypatch: pytest.MonkeyPatch) -> None:
+        self._run_gate(monkeypatch,
+                       excerpt="Fill the Mars.AI account creation form.",
+                       extraction_payloads=_list_payload())
+        assert pa.propose_form_action("event-uuid") == "skipped_not_in_list"
+
+    def test_not_applied_skips_post_application_draft(
+            self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._run_gate(
+            monkeypatch,
+            excerpt="Candidates who applied must complete verification.",
+            app_row=_app_row("NOT_APPLIED"))
+        assert pa.propose_form_action("event-uuid") == "skipped_not_applied"
+
+    def test_not_interested_skips_draft(
+            self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._run_gate(monkeypatch, excerpt="",
+                       app_row=_app_row("NOT_INTERESTED"))
+        assert pa.propose_form_action("event-uuid") == "skipped_not_applied"
+
+    def test_opening_shaped_message_still_proposes(
+            self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._run_gate(monkeypatch,
+                       excerpt="Mars.AI has opened applications for freshers.",
+                       app_row=_app_row("NOT_APPLIED"))
+        assert pa.propose_form_action("event-uuid") == "proposed"
+
+    def test_undecided_still_proposes(
+            self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._run_gate(
+            monkeypatch,
+            excerpt="Candidates who applied must complete verification.",
+            app_row=_app_row("UNKNOWN"))
+        assert pa.propose_form_action("event-uuid") == "proposed"
+
+    def test_applied_proposes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._run_gate(
+            monkeypatch,
+            excerpt="Candidates who applied must complete verification.",
+            app_row=_app_row("APPLIED"))
+        assert pa.propose_form_action("event-uuid") == "proposed"

@@ -47,6 +47,16 @@ Where to look (use the read tools first):
   registration/OA after becoming eligible);
 - events with missing designation or salary_package (verify_field);
 - anything inconsistent or stale in the stored data (data_quality).
+Application state (get_applications — company mentioned != applied):
+- follow_up / kyc_reminder / deadline_nudge proposals about an application
+  process are ONLY for opportunities whose status is APPLIED, matched on
+  company AND role. A different role of the same company does not count.
+- status NOT_APPLIED / NOT_INTERESTED: never propose a post-application
+  follow-up for that company+role, however urgent the message looks.
+- status UNKNOWN / NOT_SURE / ELIGIBLE_NOT_APPLIED: do NOT file a follow-up;
+  at most note that the student should answer the ask-whether-applied nudge.
+- pre-application openings (new drives, eligibility lists) may still be
+  proposed regardless of application state — they are not follow-ups.
 Rules:
 - Every proposal MUST carry evidence you actually saw in a tool result —
   quote it inside `reason`. Never invent companies, dates, or numbers.

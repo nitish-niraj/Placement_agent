@@ -67,3 +67,14 @@ def test_long_text_capped() -> None:
     conn = FakeConn([FakeResult(rows=[{"company": "X" * 500}])])
     rows = tools.get_events(conn)
     assert len(rows[0]["company"]) <= 301
+
+
+def test_get_applications_reports_status_per_role() -> None:
+    conn = FakeConn([FakeResult(rows=[
+        {"company": "ACCENTURE", "role": "software engineer",
+         "status": "NOT_APPLIED"},
+        {"company": "ACCENTURE", "role": "", "status": "APPLIED"}])])
+    rows = tools.run_tool(conn, "get_applications", {"company": "accenture"})
+    assert "get_applications" in tools.TOOL_SPECS
+    assert [r["status"] for r in rows] == ["NOT_APPLIED", "APPLIED"]
+    assert conn.executed[0][1]["frag"] == "%accenture%"

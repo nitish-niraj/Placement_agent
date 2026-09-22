@@ -117,6 +117,24 @@ def get_document(conn: sqlalchemy.Connection, document_id: str) -> dict:
     return dict(row) if row else {}
 
 
+def get_applications(conn: sqlalchemy.Connection,
+                     company: str | None = None) -> list[dict]:
+    """Per company+role application answers: whether the student actually
+    applied (APPLIED), said no (NOT_APPLIED), is unsure (NOT_SURE /
+    ELIGIBLE_NOT_APPLIED / UNKNOWN), or is not interested. Company mentioned
+    != applied — consult this before proposing any follow-up."""
+    sql = ("SELECT c.canonical_name AS company, s.role_normalized AS role, "
+           "s.status, s.applied_at, s.updated_at FROM application_states s "
+           "JOIN companies c ON c.id = s.company_id ")
+    params: dict[str, object] = {}
+    if company:
+        sql += "WHERE c.canonical_name ILIKE :frag "
+        first = normalize_name(company).split()
+        params["frag"] = f"%{first[0] if first else company}%"
+    sql += "ORDER BY s.updated_at DESC"
+    return [_shorten(r) for r in _rows(conn.execute(sqlalchemy.text(sql), params), 20)]
+
+
 # The registry the agent prompt is built from (name -> one-line description).
 TOOL_SPECS: dict[str, str] = {
     "search_messages": "search stored WhatsApp messages by keywords — the "
@@ -126,6 +144,9 @@ TOOL_SPECS: dict[str, str] = {
     "get_deadlines": "list deadlines and their states (optionally filtered by "
                      "state: OPEN / DUE_SOON / EXPIRED)",
     "get_company_timeline": "one company's event history with update counts",
+    "get_applications": "per company+role application answers (APPLIED / "
+                        "NOT_APPLIED / NOT_SURE / NOT_INTERESTED / UNKNOWN) — "
+                        "check before any follow-up proposal",
     "get_profile": "the student's profile (name, course, CGPA, email)",
     "get_document": "one stored document's metadata by id",
 }
@@ -144,6 +165,8 @@ def run_tool(conn: sqlalchemy.Connection, name: str, args: dict[str, str]) -> li
         return get_deadlines(conn, args.get("state"))
     if name == "get_company_timeline":
         return get_company_timeline(conn, str(args.get("company") or ""))
+    if name == "get_applications":
+        return get_applications(conn, args.get("company"))
     if name == "get_profile":
         return get_profile(conn)
     if name == "get_document":

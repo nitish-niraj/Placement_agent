@@ -180,3 +180,16 @@ explicit per-draft approval (ADR-008); approving only records the decision
 Throwaway probes/logs from Sept 12 (`probe*.py`, `listen_run*.log`) live in
 `.attic-2026-09-12/` (gitignored). Shared URL helpers: `teams/_shared.py`
 (`listener.py` re-exports them, so existing imports keep working).
+
+## Application state (DEC-011)
+
+Company mentioned ≠ you applied. When eligibility is established, PIA asks
+("Have you applied for this role?" — Telegram buttons or dashboard
+`POST /api/v1/applications/answer`) and stores the answer per company+role
+(`APPLIED / NOT_APPLIED / NOT_SURE / NOT_INTERESTED`). Afterwards:
+
+- post-application updates (confirmations, verifications, penalties) become
+  follow-ups **only if you applied** for that exact role;
+- anything else (openings, other roles, lists without your name) stays quiet
+  — attached CSV/image lists lacking your name strictly suppress FORM/KYC/
+  registration notifications, drafts, and reminders.

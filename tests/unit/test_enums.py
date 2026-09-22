@@ -1,6 +1,7 @@
 """Enum values mirror the Postgres enums in 05_Backend_Schema §2 exactly."""
 
 from pia_shared.enums import (
+    ApplicationStatus,
     DeadlineState,
     EligibilityState,
     EventStatus,
@@ -58,4 +59,12 @@ def test_event_and_deadline_states() -> None:
     ]
     assert [s.value for s in NotificationStatus] == [
         "PENDING", "QUEUED", "SENT", "FAILED", "PENDING_DELIVERY", "SUPPRESSED",
+    ]
+
+
+def test_application_status_values() -> None:
+    """Application state (company+role): mention != applied."""
+    assert [s.value for s in ApplicationStatus] == [
+        "UNKNOWN", "ELIGIBLE_NOT_APPLIED", "APPLIED",
+        "NOT_APPLIED", "NOT_SURE", "NOT_INTERESTED",
     ]

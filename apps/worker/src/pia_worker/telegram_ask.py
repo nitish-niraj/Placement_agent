@@ -13,6 +13,7 @@ Posture inherited from the repo's invariants:
 
 Run: python -m pia_worker.telegram_ask  (compose service `telegram-ask`)."""
 
+import contextlib
 import html
 import time
 from dataclasses import dataclass
@@ -21,6 +22,8 @@ import httpx
 import redis as redis_lib
 import structlog
 
+from pia_shared.enums import ApplicationStatus
+from pia_worker.notify.buttons import parse_callback
 from pia_worker.search.answer import ask_question
 from pia_worker.settings import get_settings
 
@@ -60,13 +63,17 @@ def _call(client: httpx.Client, token: str, method: str,
     return body
 
 
-def _send(client: httpx.Client, token: str, chat_id: str, text: str) -> None:
-    _call(client, token, "sendMessage", {
+def _send(client: httpx.Client, token: str, chat_id: str, text: str,
+          reply_markup: dict | None = None) -> None:
+    payload = {
         "chat_id": chat_id,
         "text": text[:_MESSAGE_LIMIT],
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
-    })
+    }
+    if reply_markup is not None:
+        payload["reply_markup"] = reply_markup
+    _call(client, token, "sendMessage", payload)
 
 
 def _render_answer(result: dict) -> str:
@@ -100,10 +107,89 @@ def _render_sources(result: dict) -> str | None:
     return "\n".join(lines) if lines else None
 
 
+def _handle_callback(client: httpx.Client, token: str, owner_chat_id: str,
+                     callback: dict) -> None:
+    """Application-state button answer: persist the student's choice and
+    confirm. Owner-gated, fail-closed; any failure is reported in the
+    callback answer itself (the buttons stay until one succeeds)."""
+    query_id = str(callback.get("id") or "")
+    message = callback.get("message") or {}
+    chat_id = str((message.get("chat") or {}).get("id", ""))
+    if chat_id != str(owner_chat_id):
+        logger.warning("telegram_callback_foreign_chat_ignored", chat_id=chat_id)
+        return
+    parsed = parse_callback(callback.get("data"))
+    if parsed is None:
+        _answer_callback(client, token, query_id, "Unknown button — ignoring.")
+        return
+    app_id, status = parsed
+    try:
+        import sqlalchemy
+
+        from pia_worker.applications import records as app_records
+        from pia_worker.db import engine_for_current_host
+
+        engine = engine_for_current_host()
+        with engine.begin() as conn:
+            row = conn.execute(
+                sqlalchemy.text(
+                    "SELECT s.user_id, s.company_id, s.role_normalized, "
+                    "c.canonical_name AS company FROM application_states s "
+                    "JOIN companies c ON c.id = s.company_id "
+                    "WHERE s.id = CAST(:id AS uuid)"
+                ),
+                {"id": app_id},
+            ).mappings().first()
+            if row is None:
+                _answer_callback(client, token, query_id,
+                                 "That opportunity is gone — nothing saved.")
+                return
+            app_records.set_application_status(
+                conn, user_id=str(row["user_id"]),
+                company_id=str(row["company_id"]),
+                role_normalized=str(row["role_normalized"] or ""),
+                status=status, source="telegram:button")
+            label = str(row["company"]) + (
+                f" / {row['role_normalized']}" if row["role_normalized"] else "")
+        confirm = {
+            ApplicationStatus.APPLIED: "noted — applied",
+            ApplicationStatus.NOT_APPLIED: "noted — not applied",
+            ApplicationStatus.NOT_SURE: "noted — unsure",
+            ApplicationStatus.NOT_INTERESTED: "noted — not interested",
+        }[status]
+        _answer_callback(client, token, query_id, f"{confirm} ({label}).")
+        with contextlib.suppress(Exception):
+            _call(client, token, "editMessageReplyMarkup", {
+                "chat_id": chat_id,
+                "message_id": message.get("message_id"),
+                "reply_markup": {"inline_keyboard": []},
+            })
+    except Exception as exc:  # noqa: BLE001 — buttons stay for a retry
+        logger.error("telegram_callback_failed", error=str(exc)[:180])
+        _answer_callback(client, token, query_id,
+                         "Couldn't save that — please try again.")
+
+
+def _answer_callback(client: httpx.Client, token: str, query_id: str,
+                     text: str) -> None:
+    """Best-effort callback answer (the toast over the chat)."""
+    if not query_id:
+        return
+    try:
+        _call(client, token, "answerCallbackQuery",
+              {"callback_query_id": query_id, "text": text[:200]})
+    except Exception as exc:  # noqa: BLE001 — toast is cosmetic
+        logger.warning("telegram_callback_answer_failed", error=str(exc)[:120])
+
+
 def _handle_update(client: httpx.Client, token: str, owner_chat_id: str,
                    update: dict, answer_fn) -> None:
     """One Telegram update -> one answer. Owner-gated, fail-closed: anything
     without text, or from any chat other than the owner's, is dropped."""
+    if "callback_query" in update:
+        _handle_callback(client, token, owner_chat_id,
+                         update.get("callback_query") or {})
+        return
     message = update.get("message") or {}
     chat_id = str((message.get("chat") or {}).get("id", ""))
     text = (message.get("text") or "").strip()

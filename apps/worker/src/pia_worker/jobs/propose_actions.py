@@ -143,12 +143,26 @@ def _propose(target: str, payload: dict, action_type: str = "form_draft") -> str
 
 
 def propose_form_action(event_id: str) -> str:
-    """WhatsApp-pipeline entry: propose from a FORM/KYC event's first link."""
+    """WhatsApp-pipeline entry: propose from a FORM/KYC event's first link.
+
+    Application-aware: a strict list gate (attached CSV/image lacks the
+    student) and a negative application answer (NOT_APPLIED/NOT_INTERESTED
+    on the matched company+role) both skip the draft. Undecided states
+    still propose — the notify path asks whether they applied.
+    """
+    from pia_worker.applications import records as app_records
+    from pia_worker.notify import records as notify_records
+    from pia_worker.notify.classify import (
+        analyze_application_message,
+        is_post_application_shaped,
+    )
+
     engine = _engine_for_current_host()
     with engine.connect() as conn:
         event = conn.execute(
             sqlalchemy.text(
-                "SELECT e.type::text AS type, c.canonical_name AS company, "
+                "SELECT e.type::text AS type, e.company_id, "
+                "c.canonical_name AS company, e.current_payload, "
                 "e.current_payload->'links' AS links FROM events e "
                 "LEFT JOIN companies c ON c.id = e.company_id "
                 "WHERE e.id = CAST(:id AS uuid)"
@@ -159,6 +173,29 @@ def propose_form_action(event_id: str) -> str:
         return "event_missing"
     if event["type"] not in _PROPOSABLE_TYPES:
         return "skipped_type"
+    payload = event["current_payload"] or {}
+    company_id = event["company_id"] and str(event["company_id"])
+    with engine.connect() as conn:
+        if app_records.message_list_gate(conn, payload.get("source_message_id"),
+                                         company_id) == "not_found":
+            logger.info("form_draft_suppressed_not_in_list", event_id=event_id)
+            return "skipped_not_in_list"
+        user_id = notify_records.get_user_id(conn)
+        role_norm = app_records.normalize_role(payload.get("designation"))
+        app_row, matched = app_records.resolve_match(
+            conn, user_id, company_id, role_norm)
+    if app_row is not None and matched:
+        from pia_shared.enums import ApplicationStatus
+        negative = ApplicationStatus(app_row["status"]) in (
+            ApplicationStatus.NOT_APPLIED, ApplicationStatus.NOT_INTERESTED)
+        shaped = is_post_application_shaped(
+            analyze_application_message(payload.get("excerpt") or ""))
+        if negative and (shaped or not (payload.get("excerpt") or "").strip()):
+            # FORM/KYC drafts are inherently post-application requests; a
+            # negative answer (or a role-less notice for one) skips the draft.
+            logger.info("form_draft_suppressed_not_applied", event_id=event_id,
+                        status=app_row["status"])
+            return "skipped_not_applied"
     links = [str(x) for x in (event["links"] or [])]
     if not links:
         return "skipped_no_link"

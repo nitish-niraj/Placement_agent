@@ -25,15 +25,27 @@ import structlog
 from rq import get_current_job
 
 from pia_shared.enums import (
+    ApplicationStatus,
     EventType,
     NotificationPriority,
     NotificationStatus,
 )
 from pia_shared.metrics import increment
+from pia_worker.applications import records as app_records
 from pia_worker.jobs.process_message import _engine
 from pia_worker.notify import records as notify_records
+from pia_worker.notify.buttons import ask_applied_keyboard
 from pia_worker.notify.channel import DeliveryError, TelegramChannel
+from pia_worker.notify.classify import (
+    APPLICATION_GATED_TYPES,
+    LIST_GATED_TYPES,
+    FollowUpDecision,
+    analyze_application_message,
+    decide_application_followup,
+    is_post_application_shaped,
+)
 from pia_worker.notify.decide import (
+    Decision,
     EventContext,
     dedup_key,
     material_state_hash,
@@ -42,6 +54,7 @@ from pia_worker.notify.decide import (
     windows_crossed,
 )
 from pia_worker.notify.render import (
+    render_ask_applied,
     render_digest,
     render_eligibility_alert,
     render_event_alert,
@@ -64,6 +77,7 @@ def _load_event(conn: sqlalchemy.Connection, event_id: str) -> dict | None:
         sqlalchemy.text(
             "SELECT e.id, e.type, e.deadline_at, e.start_at, e.company_id, "
             "e.current_payload, e.group_id, c.canonical_name AS company, "
+            "c.normalized_key AS company_key, "
             "c.watch_state, g.name AS group_name FROM events e "
             "LEFT JOIN companies c ON c.id = e.company_id "
             "LEFT JOIN groups g ON g.id = e.group_id "
@@ -87,6 +101,59 @@ def _company_eligible(conn: sqlalchemy.Connection, company_id: str | None) -> bo
     return row is not None
 
 
+def _max_priority(first: NotificationPriority,
+                  second: NotificationPriority) -> NotificationPriority:
+    """Urgency wins: ladder signals (deadline TODAY) and application signals
+    (cancellation penalty) each escalate; neither may downgrade the other."""
+    order = (NotificationPriority.LOW, NotificationPriority.MEDIUM,
+             NotificationPriority.HIGH, NotificationPriority.CRITICAL)
+    return first if order.index(first) >= order.index(second) else second
+
+
+def _application_gate(
+    conn: sqlalchemy.Connection, *, event_type: EventType,
+    company_id: str | None, payload: dict,
+) -> tuple[str, FollowUpDecision | None, dict | None]:
+    """Application-aware gate for one event notification.
+
+    Returns (verdict, decision, app_row) with verdict in:
+    - "proceed" — legacy path unchanged (ungated type, no company,
+      opening/informational shape).
+    - "proceed_boost" — APPLIED + actionable: proceed, priority floored at
+      the application decision's priority (penalty => HIGH).
+    - "ask" — undecided status + actionable message: send the
+      ask-whether-applied nudge instead of a follow-up.
+    - "suppressed_list" — strict CSV/image gate: attached list lacks the
+      student (Mars.AI-class spam ends here).
+    - "suppressed_state" — answered NOT_APPLIED/NOT_INTERESTED (or role
+      mismatch): post-application follow-up suppressed.
+    """
+    nodecision: FollowUpDecision | None = None
+    if event_type not in APPLICATION_GATED_TYPES or not company_id:
+        return "proceed", nodecision, None
+    message_id = payload.get("source_message_id")
+    if (event_type in LIST_GATED_TYPES
+            and app_records.message_list_gate(
+                conn, message_id, str(company_id)) == "not_found"):
+        return "suppressed_list", nodecision, None
+    text = (payload.get("excerpt") or "")
+    analysis = analyze_application_message(text)
+    if not is_post_application_shaped(analysis):
+        return "proceed", nodecision, None  # openings/digest unchanged
+    user_id = notify_records.get_user_id(conn)
+    role_norm = app_records.normalize_role(payload.get("designation"))
+    row, matched = app_records.resolve_match(
+        conn, user_id, str(company_id), role_norm)
+    status = ApplicationStatus(row["status"]) if row else ApplicationStatus.UNKNOWN
+    decision = decide_application_followup(
+        status=status, analysis=analysis, role_matched=matched)
+    if decision.should_follow_up:
+        return "proceed_boost", decision, row
+    if decision.suggest_ask_applied:
+        return "ask", decision, row
+    return "suppressed_state", decision, row
+
+
 def _enqueue_send(notification_id: str) -> None:
     from redis import Redis
     from rq import Queue, Retry
@@ -101,6 +168,46 @@ def _enqueue_send(notification_id: str) -> None:
     )
 
 
+def _send_ask_nudge(engine, event: dict, payload: dict, state_hash: str,
+                    outcome: str, app_row: dict | None) -> str:
+    """Ask-whether-applied nudge with answer buttons. One per event state
+    (dedup kind "ask_applied"); the answer persists the opportunity row, so
+    repeat messages after an answer never re-ask."""
+    with engine.begin() as conn:
+        user_id = notify_records.get_user_id(conn)
+        company_id = str(event["company_id"])
+        if app_row is None:
+            app_row = app_records.ensure_application(
+                conn, user_id=user_id, company_id=company_id,
+                company_normalized=str(event.get("company_key") or ""),
+                role_normalized=app_records.normalize_role(
+                    payload.get("designation")),
+                source="ask_nudge")
+        keyboard = ask_applied_keyboard(str(app_row["id"]))
+        role = payload.get("designation")
+        rendered = render_ask_applied(
+            company=event["company"], role=role,
+            event_type=str(event["type"]),
+            context_line=f"{event.get('group_name') or 'group'} · "
+                         f"msg {payload.get('source_message_id') or event['id']}")
+        notification_id, is_new = notify_records.insert_notification(
+            conn, dedup_key=dedup_key(str(event["id"]), state_hash,
+                                      kind="ask_applied"),
+            priority=NotificationPriority.MEDIUM,
+            reason="application status undecided — asking whether applied",
+            payload={"text": rendered.text, "reply_markup": keyboard,
+                     "outcome": outcome, "nudge": "ask_applied"},
+            evidence_refs=rendered.evidence_refs, event_id=str(event["id"]),
+            message_id=payload.get("source_message_id"),
+        )
+    if not is_new:
+        logger.info("ask_nudge_suppressed_dedup", event_id=str(event["id"]))
+        return "suppressed_dedup"
+    _enqueue_send(notification_id)
+    logger.info("ask_nudge_queued", event_id=str(event["id"]))
+    return "asked_applied"
+
+
 def notify_event(event_id: str, outcome: str = "created") -> str:
     engine = _engine()
     with engine.connect() as conn:
@@ -111,6 +218,41 @@ def notify_event(event_id: str, outcome: str = "created") -> str:
         eligible = _company_eligible(conn, event["company_id"] and str(event["company_id"]))
 
     payload = event["current_payload"] or {}
+    state_hash = material_state_hash(
+        event["deadline_at"], event["start_at"], payload.get("venue"),
+        payload.get("links") or [], payload.get("designation"),
+        payload.get("salary_package"),
+    )
+    key = dedup_key(str(event["id"]), state_hash)
+
+    # Application-aware gate (company mentioned != applied) + strict
+    # CSV/image list gate. Openings and informational shapes return
+    # "proceed" and ride the legacy ladder below, unchanged.
+    with engine.connect() as conn:
+        verdict, app_decision, app_row = _application_gate(
+            conn, event_type=EventType(event["type"]),
+            company_id=event["company_id"] and str(event["company_id"]),
+            payload=payload)
+    if verdict in ("suppressed_list", "suppressed_state"):
+        reason = ("attached eligibility list does not contain the student — "
+                  "strictly ignored" if verdict == "suppressed_list"
+                  else str(getattr(app_decision, "reason", "not applied")))
+        with engine.begin() as conn:
+            notify_records.insert_notification(
+                conn, dedup_key=key, priority=NotificationPriority.LOW,
+                reason=f"suppressed: {reason}",
+                payload={"outcome": outcome, "gate": verdict},
+                evidence_refs=[], event_id=str(event["id"]),
+                message_id=payload.get("source_message_id"),
+                status=NotificationStatus.SUPPRESSED,
+            )
+        logger.info("notification_suppressed_application",
+                    event_id=event_id, verdict=verdict)
+        return f"suppressed_{verdict.split('_', 1)[1]}"
+    if verdict == "ask":
+        return _send_ask_nudge(engine, event, payload, state_hash,
+                               outcome, app_row)
+
     ctx = EventContext(
         event_id=str(event["id"]),
         event_type=EventType(event["type"]),
@@ -121,12 +263,15 @@ def notify_event(event_id: str, outcome: str = "created") -> str:
         company_watching=(event["watch_state"] == "WATCHING"),
     )
     decision = priority_for_event(ctx)
-    state_hash = material_state_hash(
-        event["deadline_at"], event["start_at"], payload.get("venue"),
-        payload.get("links") or [], payload.get("designation"),
-        payload.get("salary_package"),
-    )
-    key = dedup_key(str(event["id"]), state_hash)
+    if verdict == "proceed_boost" and app_decision is not None:
+        # APPLIED + actionable: urgency wins both ways — a cancellation
+        # penalty escalates even a ladder-MEDIUM event, and a ladder-CRITICAL
+        # deadline keeps its rank.
+        boosted = _max_priority(decision.priority, app_decision.priority)
+        decision = Decision(boosted, "immediate" if boosted in (
+            NotificationPriority.CRITICAL, NotificationPriority.HIGH)
+            else "digest",
+            decision.reason + " | applied + actionable: " + app_decision.reason)
 
     # Master §11 policy flags (env): NOTIFY_CRITICAL_IMMEDIATELY /
     # NOTIFY_MEDIUM_IN_DIGEST — deployment owners may route critical items to
@@ -212,7 +357,8 @@ def send_notification(notification_id: str) -> str:
         return "already"  # idempotent re-run after retry
 
     try:
-        result = _channel().send(settings.telegram_chat_id, row["payload"]["text"])
+        result = _channel().send(settings.telegram_chat_id, row["payload"]["text"],
+                                 reply_markup=row["payload"].get("reply_markup"))
     except DeliveryError as exc:
         job = get_current_job()
         retries_left = getattr(job, "retries_left", 0) if job else 0
@@ -251,7 +397,8 @@ def notify_eligibility(record_id: str) -> str:
         record = conn.execute(
             sqlalchemy.text(
                 "SELECT r.id, r.match_method, r.confidence, r.state, r.evidence, "
-                "c.canonical_name AS company, g.name AS group_name "
+                "r.user_id, r.company_id, c.canonical_name AS company, "
+                "c.normalized_key AS company_key, g.name AS group_name "
                 "FROM eligibility_records r JOIN companies c ON c.id = r.company_id "
                 "LEFT JOIN document_extractions d ON d.id = r.source_document_id "
                 "LEFT JOIN attachments a ON a.id = d.attachment_id "
@@ -273,12 +420,26 @@ def notify_eligibility(record_id: str) -> str:
         else None,
         evidence_location=location, source_group=record["group_name"],
     )
+    # Eligibility established -> track the opportunity as ELIGIBLE_NOT_APPLIED
+    # and ask whether they applied (buttons persist the answer). Future
+    # post-application messages gate on that answer.
+    with engine.begin() as conn:
+        app_row = app_records.ensure_application(
+            conn, user_id=str(record["user_id"]),
+            company_id=str(record["company_id"]),
+            company_normalized=str(record["company_key"] or ""),
+            source="eligibility",
+            initial=ApplicationStatus.ELIGIBLE_NOT_APPLIED)
+    ask_text = (alert.text + "\n\n<b>Have you applied for this role?</b> "
+                "Tap below — future updates become follow-ups only if you have.")
     key = dedup_key(f"elig:{record['id']}", f"state:{record['state']}")
     with engine.begin() as conn:
         notification_id, is_new = notify_records.insert_notification(
             conn, dedup_key=key, priority=NotificationPriority.HIGH,
             reason="Eligibility established — you are on the company's list",
-            payload={"text": alert.text}, evidence_refs=alert.evidence_refs,
+            payload={"text": ask_text,
+                     "reply_markup": ask_applied_keyboard(str(app_row["id"]))},
+            evidence_refs=alert.evidence_refs,
             eligibility_id=str(record["id"]),
         )
     if not is_new:
@@ -286,6 +447,50 @@ def notify_eligibility(record_id: str) -> str:
     _enqueue_send(notification_id)
     logger.info("eligibility_notification_queued", record_id=record_id)
     return "queued"
+
+
+def _escalation_gated(conn: sqlalchemy.Connection, row) -> bool:  # noqa: ANN001
+    """True when this deadline reminder must not fire.
+
+    Mirrors the notify-time gate with the text available on the row
+    (excerpt, else title): the strict list gate kills FORM/KYC/REGISTRATION
+    reminders for non-listed students; post-application-shaped reminders
+    need APPLIED on the matched company+role. FORM/KYC/DOCUMENT_SUBMISSION
+    are application-shaped by nature, so with no text they still require
+    APPLIED; REGISTRATION/OA-type deadlines without post-application
+    language are treated as openings and fire (legacy behavior).
+    """
+    event_type = EventType(row["type"])
+    company_id = row["company_id"] and str(row["company_id"])
+    if company_id is None or event_type not in APPLICATION_GATED_TYPES:
+        return False
+    payload = row["current_payload"] or {}
+    if (event_type in LIST_GATED_TYPES
+            and app_records.message_list_gate(
+                conn, payload.get("source_message_id"), company_id) == "not_found"):
+        logger.info("escalation_suppressed_not_in_list",
+                    event_id=str(row["event_id"]))
+        return True
+    text = (payload.get("excerpt") or "").strip()
+    if text:
+        shaped = is_post_application_shaped(analyze_application_message(text))
+    else:
+        shaped = event_type in (EventType.FORM, EventType.KYC,
+                                EventType.DOCUMENT_SUBMISSION)
+    if not shaped:
+        return False
+    user_id = notify_records.get_user_id(conn)
+    app_row, matched = app_records.resolve_match(
+        conn, user_id, company_id,
+        app_records.normalize_role(payload.get("designation")))
+    status = (ApplicationStatus(app_row["status"]) if app_row
+              else ApplicationStatus.UNKNOWN)
+    if status is ApplicationStatus.APPLIED and matched:
+        return False
+    logger.info("escalation_suppressed_application",
+                event_id=str(row["event_id"]), status=status.value,
+                matched=matched)
+    return True
 
 
 def deadline_escalations() -> dict[str, int]:
@@ -310,7 +515,9 @@ def deadline_escalations() -> dict[str, int]:
         channel = _channel()
         for row in rows:
             eligible = _company_eligible(conn, row["company_id"]
-                                         and str(row["company_id"]))
+                                          and str(row["company_id"]))
+            if _escalation_gated(conn, row):
+                continue
             ctx = EventContext(
                 event_id=str(row["event_id"]), event_type=EventType(row["type"]),
                 deadline_at=row["deadline_at"], start_at=row["start_at"],

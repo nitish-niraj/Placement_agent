@@ -211,3 +211,126 @@ class TestGating:
         assert answer_fn.calls == ["was i eligible for the softlink?"]
         assert saved == [6]  # highest update_id + 1 persisted
         assert any(m == "sendMessage" for m, _ in recorder)
+
+
+APP_UUID = "12345678-1234-1234-1234-1234567890ab"
+
+
+def _callback(update_id: int, chat_id: str, data: str) -> dict:
+    return {"update_id": update_id,
+            "callback_query": {"id": f"q{update_id}",
+                               "data": data,
+                               "message": {"message_id": 7,
+                                           "chat": {"id": int(chat_id)}}}}
+
+
+class _FakeDBConn:
+    def __init__(self, row: dict | None):
+        self._row = row
+
+    def execute(self, sql, params=None):
+        _ = (sql, params)
+        outer = self
+
+        class _R:
+            def mappings(self):
+                return self
+
+            def first(self):
+                return outer._row
+
+        return _R()
+
+
+class _FakeDBEngine:
+    def __init__(self, row: dict | None):
+        self._row = row
+
+    def begin(self):
+        import contextlib
+        return contextlib.nullcontext(_FakeDBConn(self._row))
+
+
+class TestApplicationCallbacks:
+    def _wire(self, monkeypatch, row: dict | None):
+        import pia_worker.db as db
+        saved: list[dict] = []
+        monkeypatch.setattr(db, "engine_for_current_host",
+                            lambda: _FakeDBEngine(row))
+
+        import pia_worker.applications.records as rec
+
+        def fake_set(conn, **kwargs):
+            saved.append(kwargs)
+            return {"id": APP_UUID, "status": kwargs["status"].value}
+
+        monkeypatch.setattr(rec, "set_application_status", fake_set)
+        return saved
+
+    def test_applied_button_persists_and_confirms(
+            self, monkeypatch) -> None:
+        saved = self._wire(monkeypatch, {"user_id": "u", "company_id": "c",
+                                         "role_normalized": "",
+                                         "company": "Accenture"})
+        recorder: list = []
+        ta._handle_update(
+            _recording_client(recorder), "tok", OWNER,
+            _callback(9, OWNER, f"app:{APP_UUID}:APPLIED"), _answer_fn())
+        assert saved and saved[0]["status"].value == "APPLIED"
+        assert saved[0]["source"] == "telegram:button"
+        methods = dict(recorder)
+        assert "answerCallbackQuery" in methods
+        assert "noted — applied" in methods["answerCallbackQuery"]["text"]
+        assert "editMessageReplyMarkup" in methods  # buttons cleared
+
+    def test_all_four_answers_map(self, monkeypatch) -> None:
+        for data, word in (("APPLIED", "applied"),
+                           ("NOT_APPLIED", "not applied"),
+                           ("NOT_SURE", "unsure"),
+                           ("NOT_INTERESTED", "not interested")):
+            saved = self._wire(monkeypatch, {"user_id": "u",
+                                             "company_id": "c",
+                                             "role_normalized": "swe",
+                                             "company": "TCS"})
+            recorder: list = []
+            ta._handle_update(
+                _recording_client(recorder), "tok", OWNER,
+                _callback(9, OWNER, f"app:{APP_UUID}:{data}"), _answer_fn())
+            assert saved[0]["status"].value == data
+            assert word in dict(recorder)["answerCallbackQuery"]["text"]
+
+    def test_foreign_chat_callback_ignored(self, monkeypatch) -> None:
+        saved = self._wire(monkeypatch, {"user_id": "u", "company_id": "c",
+                                         "role_normalized": "",
+                                         "company": "Accenture"})
+        recorder: list = []
+        ta._handle_update(
+            _recording_client(recorder), "tok", OWNER,
+            _callback(9, "999999999", f"app:{APP_UUID}:APPLIED"), _answer_fn())
+        assert saved == []
+        assert recorder == []
+
+    def test_unknown_callback_data_answered(self, monkeypatch) -> None:
+        self._wire(monkeypatch, None)
+        recorder: list = []
+        ta._handle_update(
+            _recording_client(recorder), "tok", OWNER,
+            _callback(9, OWNER, "bogus:data"), _answer_fn())
+        assert "answerCallbackQuery" in dict(recorder)
+
+    def test_missing_row_answered_not_saved(self, monkeypatch) -> None:
+        saved = self._wire(monkeypatch, None)
+        recorder: list = []
+        ta._handle_update(
+            _recording_client(recorder), "tok", OWNER,
+            _callback(9, OWNER, f"app:{APP_UUID}:APPLIED"), _answer_fn())
+        assert saved == []
+        assert "gone" in dict(recorder)["answerCallbackQuery"]["text"]
+
+    def test_callback_advances_offset(self) -> None:
+        recorder: list = []
+        state = ta.PollState(offset=0)
+        ta._process_updates(_recording_client(recorder), "tok", OWNER,
+                            [_callback(12, OWNER, "bogus:data")],
+                            state, _answer_fn())
+        assert state.offset == 13
