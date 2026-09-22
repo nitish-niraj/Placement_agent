@@ -30,6 +30,12 @@ from pia_worker.ai.provider import NIMProvider, ProviderError
 from pia_worker.events.rules import FORM_LINK_PATTERN
 from pia_worker.settings import get_settings
 from pia_worker.teams import is_teams_url
+from pia_worker.teams._shared import (
+    EDGE_UA,
+    _direct_meeting_url,
+    _is_login_url,
+    _resolve_link,
+)
 
 logger = structlog.get_logger()
 
@@ -264,11 +270,9 @@ _DEAD_STATE_RE = re.compile(
     r"\b(mic|microphone|camera|video)( is)? off\b", re.IGNORECASE)
 
 
-def _is_login_url(url: str) -> bool:
-    """Microsoft login surfaces (work accounts use microsoftonline, personal
-    accounts login.live.com) — popup or same-tab alike."""
-    return ("login.microsoftonline" in url or "login.live.com" in url
-            or "microsoftonline.com" in url or "account.live.com" in url)
+# _is_login_url / _resolve_link / _direct_meeting_url live in
+# pia_worker.teams._shared (strangler extract 2026-09-22) and are re-exported
+# here so existing imports (tests, autologin, login_save) keep working.
 
 
 def _media_button_should_click(btn) -> bool:  # noqa: ANN001 — playwright handle
@@ -916,39 +920,7 @@ def _summarize(transcript_text: str, form_link: str | None,
                 f"{head}{tail}")
 
 
-def _resolve_link(url: str) -> str:
-    """Follow URL shorteners (tinyurl etc.) to the real Teams meeting URL."""
-    try:
-        response = httpx.get(url, follow_redirects=True, timeout=20)
-        resolved = str(response.url)
-        if resolved != url:
-            logger.info("short_link_resolved", final=resolved[:80])
-        return resolved
-    except httpx.HTTPError as exc:
-        logger.warning("short_link_resolve_failed", error=str(exc)[:120])
-        return url  # the browser may still follow it
-
-
-def _direct_meeting_url(launcher_url: str) -> str:
-    """Skip the launcher entirely: the /dl/launcher page encodes the real
-    meeting URL in its ?url= parameter ("/_#/meet/<id>?p=<passcode>"). Navigating
-    there directly avoids the launcher's ms-teams: app deep-link, whose native
-    Chromium dialog ("Open URL:ms-teams?") blocks automation. Anonymous join is
-    requested for personal links (the guest name is filled in the pre-join)."""
-    from urllib.parse import parse_qs, unquote, urlparse
-
-    parsed = urlparse(launcher_url)
-    inner = parse_qs(parsed.query).get("url", [None])[0]
-    if not inner:
-        return launcher_url
-    decoded = unquote(inner)
-    if not decoded.startswith("/"):
-        return launcher_url
-    direct = f"{parsed.scheme}://{parsed.netloc}{decoded}"
-    if "anon=" not in decoded and "teams.live" in parsed.netloc:
-        direct += "&anon=true"
-    logger.info("direct_meeting_url", url=direct[:90])
-    return direct
+# NOTE: _resolve_link / _direct_meeting_url imported from _shared (see top).
 
 
 def listen(meeting_url: str, *, max_minutes: int = 180,
@@ -967,9 +939,7 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
             permissions=["microphone", "camera"],  # pre-join screen toggles handled anyway
             # Realistic UA: Teams serves the full app shell to real browsers;
             # the default automation UA gets a degraded, never-loading shell.
-            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0"),
+            user_agent=EDGE_UA,
             locale="en-IN",
         )
         page = context.new_page()

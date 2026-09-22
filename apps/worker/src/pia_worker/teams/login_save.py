@@ -17,14 +17,16 @@ you're in saves anyway. Session: infrastructure/teams_session.json
 listener joins as guest/"Unverified" instead of your account.
 """
 
+import argparse
 import contextlib
-import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
 from pia_worker.teams import is_teams_url
+from pia_worker.teams._shared import EDGE_UA
 
 # Host-run tool: .../apps/worker/src/pia_worker/teams/login_save.py → repo root
 # is five parents up. (This script never runs in a container.)
@@ -53,10 +55,40 @@ def _expected_account() -> str:
 
 
 def main() -> None:
-    """login_save [meeting-url] — phase 1 org app login (always); phase 2
-    trains the consumer sign-in hop + privacy-consent cookie on the given
-    meeting URL (skipped when no URL is passed)."""
-    meeting_url = sys.argv[1] if len(sys.argv) > 1 else ""
+    """login_save [meeting-url] [--auto --meeting URL --name NAME]
+
+    Manual (default): phase 1 org app login (always); phase 2 trains the
+    consumer sign-in hop + privacy-consent cookie on the given meeting URL
+    (skipped when no URL is passed).
+    Auto (--auto): programmatic session refresh reusing the listener's
+    sign-in dialog driver (replaces archived E:/agent/autologin.py — no
+    hardcoded paths, URLs, or names). MFA still needs one phone tap.
+    """
+    parser = argparse.ArgumentParser(description="Teams session saver")
+    parser.add_argument("meeting_url", nargs="?",
+                        help="meeting URL for manual phase-2 training")
+    parser.add_argument("--auto", action="store_true",
+                        help="drive the Microsoft login forms programmatically")
+    parser.add_argument("--meeting", default="",
+                        help="meeting URL for --auto (or TEAMS_MEETING_URL)")
+    parser.add_argument("--name", default="Nitish Kumar",
+                        help="guest display name for --auto pre-join")
+    parser.add_argument("--evidence-out", default="",
+                        help="evidence dump path for --auto "
+                             "(default: transcripts/autologin_evidence_<ts>.txt)")
+    parser.add_argument("--timeout-seconds", type=int, default=300)
+    args = parser.parse_args()
+    if args.auto:
+        _auto_refresh(meeting=args.meeting, name=args.name,
+                      evidence_out=args.evidence_out,
+                      timeout_seconds=args.timeout_seconds)
+        return
+    meeting_url = args.meeting_url or ""
+    _manual_save(meeting_url)
+
+
+def _manual_save(meeting_url: str) -> None:
+    """Manual flow (unchanged): human completes the login in a headed window."""
     _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False)
@@ -64,9 +96,7 @@ def main() -> None:
             viewport={"width": 1400, "height": 900},
             # Same realistic Edge UA the listener needs — Teams serves a
             # degraded, never-loading shell to the default automation UA.
-            user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0"),
+            user_agent=EDGE_UA,
             locale="en-IN",
         )
         page = context.new_page()
@@ -228,6 +258,207 @@ def main() -> None:
              f"({_STATE_FILE.stat().st_size} bytes)")
         with contextlib.suppress(Exception):
             browser.close()
+
+
+def _drive_login_page(pg, settings) -> None:  # noqa: ANN001
+    """Complete a Microsoft login form (popup or same-tab hop). Mirrors the
+    listener's join-loop driver — email -> password -> Yes/Next."""
+    with contextlib.suppress(Exception):
+        email_box = pg.locator(
+            "input[type=email], input[name=loginfmt]").first
+        if (email_box.count() > 0 and email_box.is_visible()
+                and settings.teams_email):
+            email_box.fill(settings.teams_email)
+            pg.locator("#idSIButton9, input[type=submit], "
+                       "button[type=submit]").first.click(timeout=2000)
+            _say("login email submitted")
+            time.sleep(2)
+    with contextlib.suppress(Exception):
+        pw_box = pg.locator("input[type=password]").first
+        if (pw_box.count() > 0 and pw_box.is_visible()
+                and settings.teams_password):
+            pw_box.fill(settings.teams_password)
+            pg.locator("#idSIButton9, input[type=submit], "
+                       "button[type=submit]").first.click(timeout=2000)
+            _say("login password submitted")
+            time.sleep(2)
+    for label in ("Yes", "Next", "Accept"):
+        with contextlib.suppress(Exception):
+            btn = pg.get_by_role("button", name=label, exact=True).first
+            if btn.count() > 0 and btn.is_visible():
+                btn.click(timeout=1500)
+                _say(f"login prompt answered: {label}")
+
+
+def _auto_refresh(*, meeting: str, name: str, evidence_out: str,
+                  timeout_seconds: int) -> None:
+    """Programmatic refresh (ex-archived autologin.py, deduped 2026-09-22).
+
+    Drives the pre-join Sign-in link + embedded Microsoft dialog with env
+    credentials, verifies the official LPU address on the authenticated
+    pre-join, briefly joins to dump the meeting-bar controls, leaves, and
+    saves the session. Never saves on failure. MFA needs a phone tap.
+    """
+    import os
+
+    from pia_worker.settings import get_settings
+    from pia_worker.teams.listener import (
+        _direct_meeting_url,
+        _drive_signin_dialog,
+        _is_login_url,
+        _prejoin_state,
+        _resolve_link,
+    )
+
+    settings = get_settings()
+    email = (settings.teams_email or os.environ.get("TEAMS_EMAIL", "")).strip()
+    password = (settings.teams_password
+                or os.environ.get("TEAMS_PASSWORD", "")).strip()
+    meeting = (meeting or os.environ.get("TEAMS_MEETING_URL", "")).strip()
+    if not email or not password:
+        raise SystemExit("missing TEAMS_EMAIL/TEAMS_PASSWORD — source "
+                         "infrastructure/.env first")
+    if not meeting or not is_teams_url(_resolve_link(meeting)):
+        raise SystemExit("missing/invalid --meeting Teams URL")
+    direct = _direct_meeting_url(_resolve_link(meeting))
+    _STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if evidence_out:
+        dump = Path(evidence_out)
+    else:
+        dump = (_REPO_ROOT / "transcripts" /
+                ("autologin_evidence_"
+                 + datetime.now().strftime("%Y%m%d_%H%M%S") + ".txt"))
+    dump.parent.mkdir(parents=True, exist_ok=True)
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=False)
+        kwargs = {"viewport": {"width": 1400, "height": 900},
+                  "permissions": ["microphone", "camera"],
+                  "user_agent": EDGE_UA, "locale": "en-IN"}
+        if _STATE_FILE.exists():
+            kwargs["storage_state"] = str(_STATE_FILE)
+        ctx = browser.new_context(**kwargs)  # type: ignore[arg-type]
+        page = ctx.new_page()
+        _say(f"opening {direct[:90]}")
+        page.goto(direct, timeout=90_000)
+        page.wait_for_timeout(15_000)
+
+        with contextlib.suppress(Exception):
+            page.locator(
+                "[data-tid='prejoin-display-name-input']").first.fill(name)
+        with contextlib.suppress(Exception):
+            from pia_worker.teams.listener import _click_signin
+            if _click_signin(page):
+                _say("sign-in link clicked")
+        page.wait_for_timeout(5000)
+
+        # Consent notice: physical clicks time out on the overlay — use
+        # JS el.click() (archived trainer lesson). Page Next until Accept.
+        for cycle in range(12):
+            gone = True
+            with contextlib.suppress(Exception):
+                gone = page.get_by_text(
+                    "Privacy and cookies", exact=False).count() == 0
+            if gone:
+                _say(f"cycle {cycle}: consent gone")
+                break
+            els = []
+            with contextlib.suppress(Exception):
+                els = page.query_selector_all("button")
+            target = None
+            for word in ("accept all", "accept", "allow all", "i agree",
+                         "confirm choices", "next"):
+                for b in els:
+                    with contextlib.suppress(Exception):
+                        if (b.is_visible() and (b.text_content() or "")
+                                .strip().lower() == word):
+                            target = (b, word)
+                            break
+                if target:
+                    break
+            if target is None:
+                with contextlib.suppress(Exception):
+                    texts = [(b.text_content() or "").strip()
+                             for b in els if b.is_visible()][:14]
+                    _say(f"cycle {cycle}: no target, buttons={texts}")
+            else:
+                b, word = target
+                with contextlib.suppress(Exception):
+                    b.evaluate("el => el.click()")
+                    _say(f"cycle {cycle}: JS-clicked '{word}'")
+            page.wait_for_timeout(2000)
+
+        deadline = time.time() + max(60, timeout_seconds)
+        authed = False
+        last_beat = 0.0
+        while time.time() < deadline and not authed:
+            for pg2 in list(ctx.pages):
+                if pg2.is_closed():
+                    continue
+                if _is_login_url(pg2.url):
+                    _drive_login_page(pg2, settings)
+            for fr in page.frames:
+                with contextlib.suppress(Exception):
+                    if _is_login_url(fr.url):
+                        _drive_login_page(fr, settings)
+            with contextlib.suppress(Exception):
+                _drive_signin_dialog(page, settings)
+            state = _prejoin_state(page)
+            if time.time() - last_beat > 10:
+                last_beat = time.time()
+                _say(f"state: {state[:160]}")
+            body = ""
+            with contextlib.suppress(Exception):
+                body = page.text_content("body") or ""
+            if ("signin=n" in state and "name=none" in state
+                    and "joinnow=on" in state):
+                authed = email.lower() in body.lower()
+                if authed:
+                    _say(f"AUTHENTICATED PRE-JOIN — {email} present.")
+                    break
+                _say("authenticated pre-join but LPU email missing — "
+                     "wrong account?!")
+            page.wait_for_timeout(3000)
+
+        with dump.open("w", encoding="utf-8") as f:
+            f.write(_prejoin_state(page) + "\n")
+            with contextlib.suppress(Exception):
+                f.write("visible: " + " | ".join(dict.fromkeys(
+                    (b.text_content() or b.get_attribute("aria-label")
+                     or "").strip()
+                    for b in page.query_selector_all("button")
+                    if b.is_visible())))
+
+        if authed:
+            with contextlib.suppress(Exception):
+                page.locator(
+                    "[data-tid='prejoin-join-button']").first.click(
+                        timeout=5000)
+                _say("joined authenticated (evidence capture)")
+                page.wait_for_timeout(12000)
+                labels = []
+                with contextlib.suppress(Exception):
+                    for b in page.query_selector_all(
+                            "button, [role=menuitem]"):
+                        if b.is_visible():
+                            lab = ((b.get_attribute("aria-label")
+                                    or b.text_content() or "").strip())
+                            if lab and len(lab) < 60:
+                                labels.append(lab)
+                with dump.open("a", encoding="utf-8") as f:
+                    f.write("\n\nMEETING BAR: " + " | ".join(
+                        dict.fromkeys(labels)))
+                with contextlib.suppress(Exception):
+                    page.screenshot(path=str(dump.with_suffix(".png")))
+                with contextlib.suppress(Exception):
+                    page.get_by_role("button", name="Leave").first.click(
+                        timeout=3000)
+            ctx.storage_state(path=str(_STATE_FILE))
+            _say(f"SESSION SAVED ({_STATE_FILE.stat().st_size} bytes) -> "
+                 f"{dump.name}")
+        else:
+            _say(f"NOT authenticated — session NOT saved. See {dump}")
+        browser.close()
 
 
 if __name__ == "__main__":

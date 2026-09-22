@@ -19,6 +19,7 @@ dist/
 .env
 infrastructure/.env
 .env.backup*
+.env-backup*
 *.pem
 *.key
 *.log
@@ -36,11 +37,15 @@ Thumbs.db
 apps/dashboard/dist/
 backups/
 infrastructure/teams_session.json
-infrastructure/teams_session.json
 transcripts/
+# Throwaway debug archive (2026-09-22 hygiene: E:\agent root probes/logs)
+.attic-2026-09-12/
+.attic*/
 session_check.png
 probe_*.png
 
 # dev probe screenshots (2026-09-13 hygiene)
 *_probe.png
 probe_*.png
+autologin_*.png
+autologin_*.txt

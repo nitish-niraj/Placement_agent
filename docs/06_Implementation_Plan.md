@@ -141,6 +141,10 @@ Format: task → acceptance criteria → traced requirements. Every task also ob
 
 ### 2.13 Deferred (post-MVP — do not schedule)
 
+> Status 2026-09-22: P12 (Ask PIA + Telegram), P13 (F-029/F-030), and P14.1
+> (submit executor, dry-run default) are all delivered — see docs/10. Only
+> F-028's broader rollout and F-031's live-submit flip remain open.
+
 | Feature | Phase | Note |
 |---|---|---|
 | F-028 Conversational search | P12 | Needs P0–P11 stable; source-backed answers only |

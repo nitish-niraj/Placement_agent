@@ -159,3 +159,24 @@ session stays always-manual (DEC-008). Nothing is ever submitted without your
 explicit per-draft approval (ADR-008); approving only records the decision
 (audited). KYC
 *session attendance* remains always-manual (DEC-008).
+
+## Teams listener ops (2026-09-22 hygiene)
+
+```powershell
+# Join a session (sources infrastructure/.env for TEAMS_* + LLM keys)
+.\scripts\run-listener.ps1 -MeetingUrl "<teams link>" -Minutes 4
+
+# Re-save the session when the join falls back to guest/"Unverified"
+.\scripts\refresh-session.ps1 -MeetingUrl "<teams link>"   # manual, MFA-safe
+.\scripts\refresh-session.ps1 -Auto -MeetingUrl "<teams link>"  # programmatic
+# (replaces archived E:\agent\autologin.py; --auto reuses the listener's
+# sign-in driver, verifies the LPU address, never saves on failure)
+
+# Transcript retention (90+ files accumulate fast; dry-run by default)
+.\scripts\clean-transcripts.ps1 -Keep 30          # preview
+.\scripts\clean-transcripts.ps1 -Apply -Keep 30   # delete older
+```
+
+Throwaway probes/logs from Sept 12 (`probe*.py`, `listen_run*.log`) live in
+`.attic-2026-09-12/` (gitignored). Shared URL helpers: `teams/_shared.py`
+(`listener.py` re-exports them, so existing imports keep working).
