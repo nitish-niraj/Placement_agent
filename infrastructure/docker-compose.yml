@@ -24,8 +24,13 @@ services:
   redis:
     restart: unless-stopped
     image: redis:7-alpine
+    # Queue survival across restarts: AOF persistence on a named volume.
+    # Without this, a Redis restart vaporizes every pending RQ job.
+    command: redis-server --appendonly yes
     ports:
       - "6379:6379"
+    volumes:
+      - redisdata:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -89,6 +94,30 @@ services:
       dockerfile: apps/worker/Dockerfile
     env_file: .env
     environment:
+      WORKER_QUEUES: default,maintenance
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-pia}:${POSTGRES_PASSWORD:-pia}@postgres:5432/${POSTGRES_DB:-pia}
+      EVOLUTION_BASE_URL: http://evolution-api:8080
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-piaminio}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-piaminio-secret}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # Round 2 throughput: user-facing jobs (Telegram sends, approved-proposal
+  # executors) ride `realtime` and must never wait behind a bulk WhatsApp
+  # flood. Same image as worker, different queue set.
+  worker-realtime:
+    restart: unless-stopped
+    build:
+      context: ..
+      dockerfile: apps/worker/Dockerfile
+    env_file: .env
+    environment:
+      WORKER_QUEUES: realtime,maintenance
       REDIS_URL: redis://redis:6379/0
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-pia}:${POSTGRES_PASSWORD:-pia}@postgres:5432/${POSTGRES_DB:-pia}
       EVOLUTION_BASE_URL: http://evolution-api:8080
@@ -158,5 +187,6 @@ services:
 
 volumes:
   pgdata:
+  redisdata:
   miniodata:
   evolution_instances:
