@@ -48,7 +48,20 @@ _CHAT_SELECTORS = [
 _CAPTION_SELECTORS = [
     "span[data-tid='closed-caption-text']",
     "[data-tid='closed-caption'] span",
+    "[data-tid*='caption']",
+    "[aria-label*='aption']",
 ]
+
+# System strings the caption pane renders when nobody is speaking — never
+# transcript. Matched case-insensitively as substring (they are UI chrome,
+# never speech).
+_CAPTION_JUNK = (
+    "captions will be shown in",
+    "live captions are on",
+    "caption language",
+    "turn on captions",
+    "captions are off",
+)
 
 
 def _safe_wait(pg, ms: int) -> None:  # noqa: ANN001
@@ -209,12 +222,29 @@ def _extract_captions(page, seen: set[str]) -> list[str]:
         try:
             for el in page.query_selector_all(selector):
                 text = (el.text_content() or "").strip()
-                if text and text not in seen:
-                    seen.add(text)
-                    new.append(text)
+                lowered = text.lower()
+                if not text or text in seen:
+                    continue
+                if any(junk in lowered for junk in _CAPTION_JUNK):
+                    seen.add(text)  # UI chrome — remember so it never reports
+                    continue
+                seen.add(text)
+                new.append(text)
         except Exception:  # noqa: BLE001 — DOM shifts are expected
             continue
     return new
+
+
+def _caption_inventory(page) -> dict[str, int]:
+    """One-shot diagnostic: candidate-node counts per caption selector, so a
+    silent run can tell 'nobody spoke' apart from 'selectors match nothing'."""
+    inventory: dict[str, int] = {}
+    for selector in _CAPTION_SELECTORS:
+        try:
+            inventory[selector] = len(page.query_selector_all(selector))
+        except Exception:  # noqa: BLE001 — DOM shifts are expected
+            inventory[selector] = -1
+    return inventory
 
 
 # Media-toggle state detection (pre-join + meeting bar). Teams labels these
@@ -561,13 +591,40 @@ def _mute_if_live(page) -> bool:
 
 
 def _open_chat_panel(page) -> None:
-    """Open the meeting Chat panel (best-effort) — in the light-meetings UI
-    the chat stays collapsed until clicked, and an unrendered pane hides
-    messages from the DOM."""
+    """Open the DOCKED in-meeting chat panel (toolbar Chat) and stay in the
+    meeting — captions and the chat inbox are then watched together every
+    watch cycle. Clicking the app-shell Chat nav instead leaves the meeting
+    view (mini-window mode): the caption pane unmounts and the transcript
+    comes back empty. Candidates inside a <nav> landmark are therefore
+    skipped; afterwards the meeting bar (Leave) must still be on screen."""
+    try:
+        candidates = page.get_by_role(
+            "button", name=re.compile(r"chat", re.IGNORECASE)).all()
+    except Exception:  # noqa: BLE001 — locator failure falls to legacy path
+        candidates = []
+    for btn in candidates:
+        try:
+            if btn.evaluate("el => el.closest('nav') ? 1 : 0"):
+                continue  # app-shell nav — would leave the meeting
+            if btn.is_visible() and btn.is_enabled():
+                btn.click(timeout=2500)
+                logger.info("meeting_chat_docked")
+                page.wait_for_timeout(1500)
+                break
+        except Exception:  # noqa: BLE001 — try the next candidate
+            continue
+    else:
+        # Legacy single-click path (may land on the app-shell chat page).
+        with contextlib.suppress(Exception):
+            page.get_by_role("button", name="Chat", exact=False).first.click(
+                timeout=2500)
+            logger.info("chat_panel_opened")
+            page.wait_for_timeout(1500)
     with contextlib.suppress(Exception):
-        page.get_by_role("button", name="Chat", exact=False).first.click(timeout=2500)
-        logger.info("chat_panel_opened")
-        page.wait_for_timeout(1500)
+        if page.get_by_role("button", name="Leave").count():
+            logger.info("stayed_in_meeting")
+        else:
+            logger.warning("meeting_view_lost_after_chat_open")
 
 
 def _dump_controls(page, tag: str) -> list[str]:
@@ -1214,6 +1271,10 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
                 break
             _safe_wait(page, 6000)
         _open_chat_panel(page)      # form links land in the meeting chat
+        # One-shot pane inventory: a silent run can then tell 'nobody spoke'
+        # apart from 'selectors match nothing'. Diagnostics never break watch.
+        with contextlib.suppress(Exception):
+            logger.info("caption_pane_inventory", **_caption_inventory(page))
 
         transcript_file = _TRANSCRIPT_DIR / (
             "kyc_" + datetime.now().strftime("%Y%m%d_%H%M") + ".txt")
