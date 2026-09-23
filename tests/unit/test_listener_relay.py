@@ -1,10 +1,15 @@
 """P13 listener→draft bridge: _relay_form_link must (a) still send the
 Telegram relay first, (b) propose the meeting form draft with the detected
 presenters, and (c) never die when the DB write fails — the relay already
-went out and the session must continue."""
+went out and the session must continue.
+
+Canonical home is pia_worker.teams.chat (strangler 2B); listener.py
+re-exports the names."""
 
 import pytest
 
+import pia_worker.teams.captions as CAP
+import pia_worker.teams.chat as C
 from pia_worker.teams import listener as L
 
 
@@ -24,7 +29,7 @@ def test_relay_proposes_draft_with_presenters(
         "pia_worker.jobs.propose_actions.propose_meeting_form_action",
         lambda link, presenters=(), company=None: calls.append(
             (link, presenters)) or "proposed")
-    L._relay_form_link("https://docs.google.com/forms/d/e/ABC/viewform",
+    C._relay_form_link("https://docs.google.com/forms/d/e/ABC/viewform",
                        presenters=("Dr. Sharma",))
     assert relayed and "KYC feedback form is up" in relayed[0]
     assert calls == [("https://docs.google.com/forms/d/e/ABC/viewform",
@@ -39,7 +44,7 @@ def test_db_failure_never_breaks_the_relay(
 
     monkeypatch.setattr(
         "pia_worker.jobs.propose_actions.propose_meeting_form_action", boom)
-    L._relay_form_link("https://docs.google.com/forms/d/e/ABC/viewform")
+    C._relay_form_link("https://docs.google.com/forms/d/e/ABC/viewform")
     assert relayed  # the Telegram relay still went out
 
 
@@ -51,7 +56,7 @@ def test_relay_without_presenters_still_proposes(
         "pia_worker.jobs.propose_actions.propose_meeting_form_action",
         lambda link, presenters=(), company=None: calls.append(presenters)
         or "proposed")
-    L._relay_form_link("https://forms.office.com/r/xyz")
+    C._relay_form_link("https://forms.office.com/r/xyz")
     assert calls == [()]  # empty presenters tuple, draft proposed anyway
 
 
@@ -116,19 +121,19 @@ class TestOpenChatPanel:
     def test_skips_app_shell_nav(self) -> None:
         nav_btn, toolbar_btn = _FakeBtn(in_nav=True), _FakeBtn(in_nav=False)
         page = _FakePage([nav_btn, toolbar_btn])
-        L._open_chat_panel(page)  # type: ignore[arg-type]
+        C._open_chat_panel(page)  # type: ignore[arg-type]
         assert not nav_btn.clicked
         assert toolbar_btn.clicked
         assert not page.locator.legacy_clicked
 
     def test_all_in_nav_falls_back_to_legacy(self) -> None:
         page = _FakePage([_FakeBtn(in_nav=True)])
-        L._open_chat_panel(page)  # type: ignore[arg-type]
+        C._open_chat_panel(page)  # type: ignore[arg-type]
         assert page.locator.legacy_clicked
 
     def test_no_candidates_falls_back_to_legacy(self) -> None:
         page = _FakePage([])
-        L._open_chat_panel(page)  # type: ignore[arg-type]
+        C._open_chat_panel(page)  # type: ignore[arg-type]
         assert page.locator.legacy_clicked
 
 
@@ -158,24 +163,69 @@ class TestExtractCaptions:
         page = _FakeCaptionPage(
             {"span[data-tid='closed-caption-text']": ["hello class", "hello class"]})
         seen: set[str] = set()
-        assert L._extract_captions(page, seen) == ["hello class"]  # type: ignore[arg-type]
-        assert L._extract_captions(page, seen) == []  # type: ignore[arg-type]
+        assert CAP._extract_captions(page, seen) == ["hello class"]  # type: ignore[arg-type]
+        assert CAP._extract_captions(page, seen) == []  # type: ignore[arg-type]
 
     def test_ui_chrome_never_transcript(self) -> None:
         page = _FakeCaptionPage(
             {"[data-tid*='caption']": ["Captions will be shown in English (UK).",
                                        "welcome everyone"]})
         seen: set[str] = set()
-        assert L._extract_captions(page, seen) == ["welcome everyone"]  # type: ignore[arg-type]
+        assert CAP._extract_captions(page, seen) == ["welcome everyone"]  # type: ignore[arg-type]
 
     def test_broad_selectors_catch_unmarked_pane(self) -> None:
         page = _FakeCaptionPage({"[aria-label*='aption']": ["good morning"]})
-        assert L._extract_captions(page, set()) == ["good morning"]  # type: ignore[arg-type]
+        assert CAP._extract_captions(page, set()) == ["good morning"]  # type: ignore[arg-type]
 
     def test_inventory_counts_and_marks_failures(self) -> None:
         page = _FakeCaptionPage(
             {"span[data-tid='closed-caption-text']": ["a", "b"]},
             fail={"[data-tid*='caption']"})
-        inventory = L._caption_inventory(page)  # type: ignore[arg-type]
+        inventory = CAP._caption_inventory(page)  # type: ignore[arg-type]
         assert inventory["span[data-tid='closed-caption-text']"] == 2
         assert inventory["[data-tid*='caption']"] == -1
+
+
+class TestPaneHealth:
+    def test_healthy_primary(self) -> None:
+        state, _ = CAP.pane_health(
+            {"span[data-tid='closed-caption-text']": 3,
+             "[data-tid*='caption']": 3})
+        assert state == "healthy"
+
+    def test_fallback_when_primary_empty(self) -> None:
+        state, reason = CAP.pane_health(
+            {"span[data-tid='closed-caption-text']": 0,
+             "[aria-label*='aption']": 2})
+        assert state == "fallback"
+        assert "2 node" in reason
+
+    def test_quiet_when_all_empty(self) -> None:
+        state, _ = CAP.pane_health(
+            {"span[data-tid='closed-caption-text']": 0,
+             "[data-tid*='caption']": 0})
+        assert state == "quiet"
+
+    def test_dead_when_all_throw(self) -> None:
+        state, _ = CAP.pane_health(
+            {"span[data-tid='closed-caption-text']": -1,
+             "[data-tid*='caption']": -1})
+        assert state == "dead"
+
+    def test_degraded_on_partial_throw(self) -> None:
+        state, _ = CAP.pane_health(
+            {"span[data-tid='closed-caption-text']": 0,
+             "[data-tid*='caption']": -1})
+        assert state == "degraded"
+
+    def test_listener_reexports_caption_names(self) -> None:
+        assert L._extract_captions is CAP._extract_captions
+        assert L._caption_inventory is CAP._caption_inventory
+        assert L._try_enable_captions is CAP._try_enable_captions
+        assert L._captions_on is CAP._captions_on
+
+def test_listener_reexports_chat_names():
+    assert L._relay_form_link is C._relay_form_link
+    assert L._open_chat_panel is C._open_chat_panel
+    assert L._presenter_names is C._presenter_names
+    assert L._extract_chat_links is C._extract_chat_links

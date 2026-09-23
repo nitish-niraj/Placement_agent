@@ -16,6 +16,7 @@ Provider failure never fails the pipeline: Telegram errors become RQ retries,
 then PENDING_DELIVERY (TRD §8 backup path).
 """
 
+import contextlib
 import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -726,3 +727,269 @@ def daily_digest() -> str:
         notify_records.mark_digest_sent(conn, ids, "digest")
     logger.info("digest_created", items=len(ids), date=today)
     return f"sent:{len(ids)}"
+
+
+REVIEW_DIGEST_MAX_ITEMS = 15
+REVIEW_EXPIRY_DAYS = 30
+
+
+def review_digest() -> str:
+    """Weekly NEEDS_REVIEW digest: low-confidence parses (mostly image
+    screenshots) the automation couldn't decide on. Sends at most once per
+    ISO week and only when there are NEW items since the last report (item
+    ids ride the anchor fingerprint). Items older than 30 days age out —
+    counted, never nagged about again. Tied to DIGEST_ENABLED."""
+    settings = get_settings()
+    if not settings.digest_enabled:
+        logger.info("review_digest_disabled_by_flag")
+        return "disabled"
+    engine = _engine()
+    now = datetime.now(tz=ZoneInfo(settings.app_timezone))
+    week_anchor = f"review_digest:{now.isocalendar()[0]}-W{now.isocalendar()[1]:02d}"
+    with engine.connect() as conn:
+        last = conn.execute(
+            sqlalchemy.text(
+                "SELECT fingerprint FROM idempotency_keys "
+                "WHERE key LIKE 'review_digest:%' ORDER BY key DESC LIMIT 1"
+            )
+        ).first()
+    reported: set[str] = set()
+    if last is not None and last.fingerprint:
+        with contextlib.suppress(Exception):
+            reported = set(json.loads(last.fingerprint))
+    with engine.connect() as conn:
+        rows = conn.execute(
+            sqlalchemy.text(
+                "SELECT DISTINCT ON (a.id) a.id, a.file_name, a.created_at, "
+                "d.extractor, g.name AS group_name FROM attachments a "
+                "LEFT JOIN document_extractions d ON d.attachment_id = a.id "
+                "LEFT JOIN messages m ON m.id = a.message_id "
+                "LEFT JOIN groups g ON g.id = m.group_id "
+                "WHERE a.processing_state = 'NEEDS_REVIEW' "
+                "AND a.created_at > now() - make_interval(days => :days) "
+                "ORDER BY a.id, d.created_at DESC NULLS LAST"
+            ),
+            {"days": REVIEW_EXPIRY_DAYS},
+        ).mappings().all()
+        expired = conn.execute(
+            sqlalchemy.text(
+                "SELECT COUNT(*) FROM attachments "
+                "WHERE processing_state = 'NEEDS_REVIEW' "
+                "AND created_at <= now() - make_interval(days => :days)"
+            ),
+            {"days": REVIEW_EXPIRY_DAYS},
+        ).scalar_one()
+    fresh = [dict(r) for r in rows if str(r["id"]) not in reported]
+    if not fresh:
+        logger.info("review_digest_nothing_new")
+        return "nothing_new"
+    shown = fresh[:REVIEW_DIGEST_MAX_ITEMS]
+    lines = ["🔍 <b>REVIEW NEEDED</b> — "
+             f"{len(fresh)} attachment(s) need your eyes", ""]
+    for i, item in enumerate(shown, 1):
+        when = item["created_at"].astimezone(
+            ZoneInfo(settings.app_timezone)).strftime("%d %b") \
+            if item["created_at"] else "?"
+        extractor = item["extractor"] or "unknown parser"
+        group = item["group_name"] or "group"
+        lines.append(
+            f"{i}. {item['file_name'] or 'unnamed file'} "
+            f"({extractor}, {group}, {when})")
+    if len(fresh) > len(shown):
+        lines.append(f"…and {len(fresh) - len(shown)} more.")
+    if expired:
+        lines.append(f"\n<i>{expired} older item(s) aged out of review.</i>")
+    lines.append("\nLow-confidence parses the automation couldn't decide on. "
+                 "Check them on the dashboard.")
+    with engine.begin() as conn:
+        claimed = conn.execute(
+            sqlalchemy.text(
+                "INSERT INTO idempotency_keys (key, fingerprint, entity_ref) "
+                "VALUES (:key, :fp, :ref) ON CONFLICT (key) DO NOTHING "
+                "RETURNING key"
+            ),
+            {"key": week_anchor,
+             "fp": json.dumps([str(r["id"]) for r in fresh]),
+             "ref": "review_digest"},
+        ).first()
+        if claimed is None:
+            logger.info("review_digest_skipped_duplicate", week=week_anchor)
+            return "duplicate"
+        try:
+            _channel().send(settings.telegram_chat_id, "\n".join(lines))
+        except DeliveryError as exc:
+            # Release the anchor: nothing went out, next run must retry.
+            conn.execute(
+                sqlalchemy.text(
+                    "DELETE FROM idempotency_keys WHERE key = :key"),
+                {"key": week_anchor},
+            )
+            logger.warning("review_digest_delivery_failed",
+                           error=str(exc)[:120])
+            return "delivery_failed"
+    logger.info("review_digest_sent", items=len(fresh), expired=expired)
+    return f"sent:{len(fresh)}"
+
+
+def resurface_stuck_notifications(dry_run: bool = False) -> dict[str, int]:
+    """One-off triage for QUEUED / PENDING_DELIVERY rows (the backup path
+    that never resurfaced): each row is re-decided through TODAY's pipeline —
+    EXPIRED-aware ladder, event liveness, and the application gate.
+
+    - still actionable + immediate → text rebuilt with current templates,
+      status back to QUEUED, send re-enqueued;
+    - digest-worthy or ask-nudge → PENDING (the digest carries it);
+    - expired / dead event / gate-suppressed → SUPPRESSED, never sent.
+    Stale "Deadline is TODAY" texts are re-rendered or buried, never resent
+    verbatim. Status-guard UPDATEs make reruns idempotent.
+    """
+    settings = get_settings()
+    now = datetime.now(tz=ZoneInfo(settings.app_timezone))
+    engine = _engine()
+    counts = {"checked": 0, "resent": 0, "to_digest": 0, "superseded": 0}
+    with engine.connect() as conn:
+        rows = conn.execute(
+            sqlalchemy.text(
+                "SELECT n.id, n.priority::text AS priority, n.event_id, "
+                "n.payload, n.reason, n.status::text AS status "
+                "FROM notifications n "
+                "WHERE n.status IN ('QUEUED', 'PENDING_DELIVERY') "
+                "ORDER BY n.created_at"
+            )
+        ).mappings().all()
+    for row in rows:
+        counts["checked"] += 1
+        outcome = _resurface_one(engine, dict(row), now, dry_run)
+        counts[outcome] = counts.get(outcome, 0) + 1
+    logger.info("resurface_done", dry_run=dry_run, **counts)
+    return counts
+
+
+def _resurface_one(engine, note: dict, now: datetime,  # noqa: ANN001
+                   dry_run: bool) -> str:
+    """Re-decide one stuck notification. Returns resent|to_digest|superseded."""
+    nid = str(note["id"])
+    with engine.connect() as conn:
+        event = (_load_event(conn, str(note["event_id"]))
+                 if note["event_id"] else None)
+    if event is None:
+        return _resurface_mark(
+            engine, nid, "superseded", "resurface: event gone", dry_run)
+    with engine.connect() as conn:
+        status_row = conn.execute(
+            sqlalchemy.text(
+                "SELECT status::text AS status FROM events "
+                "WHERE id = CAST(:id AS uuid)"
+            ),
+            {"id": str(event["id"])},
+        ).first()
+    event_status = str(status_row.status) if status_row else "ACTIVE"
+    if event_status in ("CANCELLED", "EXPIRED", "COMPLETED"):
+        return _resurface_mark(
+            engine, nid, "superseded",
+            f"resurface: event {event_status.lower()}", dry_run)
+    payload = event["current_payload"] or {}
+    eligible = _company_eligible_from_event(engine, event)
+    ctx = EventContext(
+        event_id=str(event["id"]), event_type=EventType(event["type"]),
+        deadline_at=event["deadline_at"], start_at=event["start_at"],
+        has_company=event["company_id"] is not None,
+        company_eligible=eligible,
+        company_watching=(event["watch_state"] == "WATCHING"),
+        deadline_state=str(event["deadline_state"])
+        if event["deadline_state"] is not None else None,
+    )
+    decision = priority_for_event(ctx, now)
+    if decision.priority is NotificationPriority.LOW and \
+            "EXPIRED" in decision.reason:
+        return _resurface_mark(
+            engine, nid, "superseded",
+            f"resurface: expired — {decision.reason}", dry_run)
+    with engine.connect() as conn:
+        verdict, app_decision, app_row = _application_gate(
+            conn, event_type=EventType(event["type"]),
+            company_id=event["company_id"] and str(event["company_id"]),
+            payload=payload)
+    if verdict in ("suppressed_list", "suppressed_state"):
+        return _resurface_mark(
+            engine, nid, "superseded",
+            f"resurface: gate {verdict}", dry_run)
+    if verdict == "ask" or decision.delivery == "digest":
+        return _resurface_mark(
+            engine, nid, "to_digest",
+            f"resurface: digest-worthy — {decision.reason}", dry_run,
+            to_status="PENDING")
+    # Still live + immediate: rebuild text with current templates.
+    resolved = _build_resolved_context(
+        engine, event, payload, eligible, app_row,
+        decision_reason=decision.reason)
+    links = tuple(payload.get("links") or [])
+    old_outcome = (note.get("payload") or {}).get("outcome") or "created"
+    if old_outcome == "delta":
+        alert = render_event_updated(
+            resolved, _latest_delta(
+                engine, str(event["id"]), payload.get("source_message_id")),
+            links)
+    else:
+        alert = render_event(resolved, links, payload.get("salary_package"))
+    if dry_run:
+        logger.info("resurface_would_resend", notification_id=nid,
+                    priority=decision.priority.value)
+        return "resent"
+    with engine.begin() as conn:
+        updated = conn.execute(
+            sqlalchemy.text(
+                "UPDATE notifications SET priority = CAST(:p AS notification_priority), "
+                "status = CAST('QUEUED' AS notification_status), "
+                "reason = :reason, payload = CAST(:payload AS jsonb), "
+                "updated_at = now() WHERE id = CAST(:id AS uuid) "
+                "AND status IN ('QUEUED', 'PENDING_DELIVERY')"
+            ),
+            {"p": decision.priority.value, "id": nid,
+             "reason": f"[{resolved.stage}] {resolved.recommendation_text}",
+             "payload": json.dumps({"text": alert.text,
+                                    "outcome": old_outcome,
+                                    "resurfaced": True,
+                                    "subject": resolved.subject_display,
+                                    "stage": resolved.stage,
+                                    "topic": resolved.topic.value,
+                                    "recommendation":
+                                    resolved.recommendation.value},
+                                   default=str)},
+        ).rowcount
+        if not updated:
+            return "superseded"  # lost a race with another pass
+    _enqueue_send(nid)
+    logger.info("notification_resurfaced", notification_id=nid,
+                priority=decision.priority.value)
+    return "resent"
+
+
+def _resurface_mark(engine, nid: str, outcome: str, reason: str,  # noqa: ANN001
+                    dry_run: bool,
+                    to_status: str = "SUPPRESSED") -> str:
+    """Record a resurface decision (or log it in dry-run mode)."""
+    if dry_run:
+        logger.info("resurface_would_mark", notification_id=nid,
+                    outcome=outcome, reason=reason[:120])
+        return outcome
+    target = "SUPPRESSED" if outcome == "superseded" else to_status
+    with engine.begin() as conn:
+        conn.execute(
+            sqlalchemy.text(
+                "UPDATE notifications SET status = CAST(:s AS notification_status), "
+                "reason = :reason, updated_at = now() "
+                "WHERE id = CAST(:id AS uuid) "
+                "AND status IN ('QUEUED', 'PENDING_DELIVERY')"
+            ),
+            {"s": target, "reason": reason, "id": nid},
+        )
+    logger.info("notification_resurface_marked", notification_id=nid,
+                outcome=outcome)
+    return outcome
+
+
+def _company_eligible_from_event(engine, event: dict) -> bool:  # noqa: ANN001
+    with engine.connect() as conn:
+        return _company_eligible(
+            conn, event["company_id"] and str(event["company_id"]))

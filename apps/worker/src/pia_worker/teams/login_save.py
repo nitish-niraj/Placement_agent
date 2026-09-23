@@ -261,33 +261,11 @@ def _manual_save(meeting_url: str) -> None:
 
 
 def _drive_login_page(pg, settings) -> None:  # noqa: ANN001
-    """Complete a Microsoft login form (popup or same-tab hop). Mirrors the
-    listener's join-loop driver — email -> password -> Yes/Next."""
-    with contextlib.suppress(Exception):
-        email_box = pg.locator(
-            "input[type=email], input[name=loginfmt]").first
-        if (email_box.count() > 0 and email_box.is_visible()
-                and settings.teams_email):
-            email_box.fill(settings.teams_email)
-            pg.locator("#idSIButton9, input[type=submit], "
-                       "button[type=submit]").first.click(timeout=2000)
-            _say("login email submitted")
-            time.sleep(2)
-    with contextlib.suppress(Exception):
-        pw_box = pg.locator("input[type=password]").first
-        if (pw_box.count() > 0 and pw_box.is_visible()
-                and settings.teams_password):
-            pw_box.fill(settings.teams_password)
-            pg.locator("#idSIButton9, input[type=submit], "
-                       "button[type=submit]").first.click(timeout=2000)
-            _say("login password submitted")
-            time.sleep(2)
-    for label in ("Yes", "Next", "Accept"):
-        with contextlib.suppress(Exception):
-            btn = pg.get_by_role("button", name=label, exact=True).first
-            if btn.count() > 0 and btn.is_visible():
-                btn.click(timeout=1500)
-                _say(f"login prompt answered: {label}")
+    """Console-facing alias of the single login driver (auth.py) — kept for
+    backward compatibility; new code calls auth.drive_login_page directly."""
+    from pia_worker.teams.auth import drive_login_page
+
+    drive_login_page(pg, settings, say=_say)
 
 
 def _auto_refresh(*, meeting: str, name: str, evidence_out: str,
@@ -302,12 +280,15 @@ def _auto_refresh(*, meeting: str, name: str, evidence_out: str,
     import os
 
     from pia_worker.settings import get_settings
-    from pia_worker.teams.listener import (
+    from pia_worker.teams._shared import (
         _direct_meeting_url,
-        _drive_signin_dialog,
         _is_login_url,
-        _prejoin_state,
         _resolve_link,
+    )
+    from pia_worker.teams.auth import (
+        _drive_signin_dialog,
+        _prejoin_state,
+        drive_login_page,
     )
 
     settings = get_settings()
@@ -347,7 +328,7 @@ def _auto_refresh(*, meeting: str, name: str, evidence_out: str,
             page.locator(
                 "[data-tid='prejoin-display-name-input']").first.fill(name)
         with contextlib.suppress(Exception):
-            from pia_worker.teams.listener import _click_signin
+            from pia_worker.teams.auth import _click_signin
             if _click_signin(page):
                 _say("sign-in link clicked")
         page.wait_for_timeout(5000)
@@ -396,11 +377,11 @@ def _auto_refresh(*, meeting: str, name: str, evidence_out: str,
                 if pg2.is_closed():
                     continue
                 if _is_login_url(pg2.url):
-                    _drive_login_page(pg2, settings)
+                    drive_login_page(pg2, settings, say=_say)
             for fr in page.frames:
                 with contextlib.suppress(Exception):
                     if _is_login_url(fr.url):
-                        _drive_login_page(fr, settings)
+                        drive_login_page(fr, settings, say=_say)
             with contextlib.suppress(Exception):
                 _drive_signin_dialog(page, settings)
             state = _prejoin_state(page)
@@ -410,12 +391,14 @@ def _auto_refresh(*, meeting: str, name: str, evidence_out: str,
             body = ""
             with contextlib.suppress(Exception):
                 body = page.text_content("body") or ""
-            if ("signin=n" in state and "name=none" in state
-                    and "joinnow=on" in state):
-                authed = email.lower() in body.lower()
-                if authed:
-                    _say(f"AUTHENTICATED PRE-JOIN — {email} present.")
-                    break
+            from pia_worker.teams.auth import (
+                is_authenticated_join,
+                is_verified_session,
+            )
+            if is_verified_session(state, body, email):
+                _say(f"AUTHENTICATED PRE-JOIN — {email} present.")
+                break
+            if "joinnow=on" in state and is_authenticated_join(state):
                 _say("authenticated pre-join but LPU email missing — "
                      "wrong account?!")
             page.wait_for_timeout(3000)

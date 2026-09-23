@@ -16,7 +16,6 @@ lightweight over heavy).
 """
 
 import contextlib
-import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -25,9 +24,6 @@ import httpx
 import structlog
 from playwright.sync_api import sync_playwright
 
-from pia_shared.schemas import MeetingSummary
-from pia_worker.ai.provider import NIMProvider, ProviderError
-from pia_worker.events.rules import FORM_LINK_PATTERN
 from pia_worker.settings import get_settings
 from pia_worker.teams import is_teams_url
 from pia_worker.teams._shared import (
@@ -35,6 +31,99 @@ from pia_worker.teams._shared import (
     _direct_meeting_url,
     _is_login_url,
     _resolve_link,
+)
+from pia_worker.teams.auth import (
+    _click_signin as _click_signin,
+)
+from pia_worker.teams.auth import (
+    _dismiss_consent as _dismiss_consent,
+)
+from pia_worker.teams.auth import (
+    _drive_signin_dialog as _drive_signin_dialog,
+)
+from pia_worker.teams.auth import (
+    _prejoin_state as _prejoin_state,
+)
+from pia_worker.teams.auth import (
+    _prejoin_status as _prejoin_status,
+)
+from pia_worker.teams.auth import (
+    check_session as check_session,
+)
+from pia_worker.teams.auth import (
+    drive_login_page as drive_login_page,
+)
+from pia_worker.teams.auth import (
+    is_authenticated_join as is_authenticated_join,
+)
+from pia_worker.teams.auth import (
+    is_verified_session as is_verified_session,
+)
+from pia_worker.teams.auth import (
+    note_guest_join as note_guest_join,
+)
+from pia_worker.teams.captions import (
+    _await_captions as _await_captions,
+)
+from pia_worker.teams.captions import (
+    _caption_inventory as _caption_inventory,
+)
+from pia_worker.teams.captions import (
+    _captions_on as _captions_on,
+)
+from pia_worker.teams.captions import (
+    _click_by_text as _click_by_text,
+)
+from pia_worker.teams.captions import (
+    _dump_controls as _dump_controls,
+)
+from pia_worker.teams.captions import (
+    _extract_captions as _extract_captions,
+)
+from pia_worker.teams.captions import (
+    _try_enable_captions as _try_enable_captions,
+)
+from pia_worker.teams.captions import (
+    pane_health as pane_health,
+)
+from pia_worker.teams.chat import (
+    _extract_chat_links as _extract_chat_links,
+)
+from pia_worker.teams.chat import (
+    _open_chat_panel as _open_chat_panel,
+)
+from pia_worker.teams.chat import (
+    _presenter_names as _presenter_names,
+)
+from pia_worker.teams.chat import (
+    _relay_form_link as _relay_form_link,
+)
+from pia_worker.teams.prejoin import (
+    _media_button_should_click as _media_button_should_click,
+)
+from pia_worker.teams.prejoin import (
+    _mute_if_live as _mute_if_live,
+)
+from pia_worker.teams.prejoin import (
+    _resolve_live_page as _resolve_live_page,
+)
+from pia_worker.teams.prejoin import (
+    _safe_wait as _safe_wait,
+)
+from pia_worker.teams.prejoin import (
+    _turn_media_off_prejoin as _turn_media_off_prejoin,
+)
+
+# Strangler re-exports: canonical homes own the logic; these aliases keep
+# existing imports (tests, login_save) working during the drain.
+from pia_worker.teams.summary import (
+    _groq_summary as _groq_summary,
+)
+from pia_worker.teams.summary import (
+    _openrouter_summary as _openrouter_summary,
+)
+from pia_worker.teams.summary import (
+    _summarize as _summarize,
 )
 
 logger = structlog.get_logger()
@@ -45,63 +134,6 @@ logger = structlog.get_logger()
 
 _STATE_FILE = Path(__file__).resolve().parents[5] / "infrastructure" / "teams_session.json"
 _TRANSCRIPT_DIR = Path(__file__).resolve().parents[5] / "transcripts"
-_FORM_LINK = FORM_LINK_PATTERN  # P13/F-029: one shared detector (events/rules)
-_FORM_RE = None  # compiled lazily inside watch loop
-_CHAT_SELECTORS = [
-    "[role='list'] [data-tid='chat-pane-item']",  # best-effort; Teams DOM shifts
-    "div[data-tid='message-body-content']",
-]
-_CAPTION_SELECTORS = [
-    "span[data-tid='closed-caption-text']",
-    "[data-tid='closed-caption'] span",
-    "[data-tid*='caption']",
-    "[aria-label*='aption']",
-]
-
-# System strings the caption pane renders when nobody is speaking — never
-# transcript. Matched case-insensitively as substring (they are UI chrome,
-# never speech).
-_CAPTION_JUNK = (
-    "captions will be shown in",
-    "live captions are on",
-    "caption language",
-    "turn on captions",
-    "captions are off",
-)
-
-
-def _safe_wait(pg, ms: int) -> None:  # noqa: ANN001
-    """wait_for_timeout that survives a closed tab — run 11 died on the
-    first unguarded call after Teams replaced the join tab post-auth."""
-    with contextlib.suppress(Exception):
-        if not pg.is_closed():
-            pg.wait_for_timeout(ms)
-
-
-def _resolve_live_page(context, old):  # noqa: ANN001
-    """Find the page that actually hosts the meeting: the auth redirect can
-    CLOSE the tab whose Join button we clicked (run 11 crash). A meeting tab
-    shows 'Leave' or the lobby screen; fall back to any live tab."""
-    for _ in range(20):
-        for pg in context.pages:
-            with contextlib.suppress(Exception):
-                if pg.is_closed():
-                    continue
-                if (pg.locator("button:has-text('Leave')").count() > 0
-                        or pg.locator(
-                            "[data-tid='calling-lobby-screen']").count() > 0):
-                    return pg
-        with contextlib.suppress(Exception):
-            if not old.is_closed() and ("v2/" in old.url
-                                        or "/meet" in old.url):
-                return old
-        time.sleep(1)
-    for pg in context.pages:
-        with contextlib.suppress(Exception):
-            if not pg.is_closed():
-                return pg
-    return old
-
 
 def _telegram_send(*, text: str | None = None, photo: bytes | None = None,
                    caption: str | None = None,
@@ -132,7 +164,6 @@ def _telegram_send(*, text: str | None = None, photo: bytes | None = None,
         logger.warning("telegram_send_failed", error=str(exc)[:120])
         return False
 
-
 def _send_join_proof(pg, identity: str) -> None:  # noqa: ANN001
     """Owner's ask: a screenshot on Telegram proving the join happened."""
     shot = _TRANSCRIPT_DIR / ("join_proof_"
@@ -149,784 +180,11 @@ def _send_join_proof(pg, identity: str) -> None:  # noqa: ANN001
                      + " — mic/camera verified off, captions state shown "
                        "in-meeting."))
 
-
-# Self-introductions in captions/chat ('this is X', "I'm X from Y") — the
-# presenter/teacher name the owner wants alongside the form-link relay.
-_SELF_INTRO = re.compile(
-    r"\b(?:i am|i'm|this is|my name is|name is|name's|here's|"
-    r"joining us(?:\s+today)? is|with (?:me|us)(?:\s+today)? is)\s+"
-    r"((?:[A-Z][A-Za-z. '-]{1,20}\s){0,3}[A-Z][A-Za-z. '-]{1,20})")
-_NOT_NAMES = {"Microsoft", "Sorry", "Hello", "Hi", "Thanks", "Okay", "Yes",
-              "Team", "Everyone", "Someone", "Back", "Here"}
-
-
-def _presenter_names(caption_text: str) -> list[str]:
-    """Best-guess names of whoever led the session, most-mentioned first."""
-    counts: dict[str, int] = {}
-    for m in _SELF_INTRO.finditer(caption_text):
-        nm = " ".join(m.group(1).split())[:40]
-        if not nm or nm.split()[0] in _NOT_NAMES:
-            continue
-        counts[nm] = counts.get(nm, 0) + 1
-    return [n for n, _ in sorted(counts.items(), key=lambda kv: -kv[1])][:3]
-
-
-def _relay_form_link(link: str, presenters: tuple[str, ...] = ()) -> None:
-    """Instant Telegram relay — the owner's primary ask (fills the form
-    himself), plus the teacher/presenter name if the session revealed one.
-    The same link also becomes an approval-gated draft on the dashboard
-    (P13/F-030, DEC-008 Amendment 2026-09-13) — best-effort: a DB hiccup
-    must never break the relay or the session."""
-    who = (", ".join(presenters) if presenters
-           else "not detected in captions/chat yet")
-    text = (
-        "📝 <b>KYC feedback form is up</b>\n"
-        f"<a href='{link}'>Fill it now (manually — always yours)</a>\n"
-        f"👤 Teacher/presenter: {who}\n"
-        "Also queued as a pre-filled draft — review it on the dashboard "
-        "(Approvals).\n"
-        "The listener will leave the session shortly.")
-    if _telegram_send(text=text):
-        logger.info("form_link_relayed", link=link[:60], presenters=who)
-    try:
-        from pia_worker.jobs.propose_actions import propose_meeting_form_action
-
-        outcome = propose_meeting_form_action(link, presenters=presenters)
-        logger.info("form_draft_proposed", outcome=outcome, link=link[:60])
-    except Exception as exc:  # noqa: BLE001 — the relay already went out
-        logger.warning("form_draft_proposal_failed", error=str(exc)[:120])
-
-
-def _extract_chat_links(page) -> list[str]:
-    import re as _re
-
-    global _FORM_RE
-    if _FORM_RE is None:
-        _FORM_RE = _re.compile(_FORM_LINK)
-    links: list[str] = []
-    # Page-wide anchor scan: form links are caught wherever they render —
-    # meeting chat pane, link cards, captions, anywhere (light-meetings UI
-    # uses different chat DOM than the main app, so pane targeting is fragile).
-    try:
-        for a in page.query_selector_all("a[href]"):
-            href = a.get_attribute("href") or ""
-            if _FORM_RE.search(href):
-                links.append(href)
-    except Exception:  # noqa: BLE001 — DOM shifts are expected
-        pass
-    # Text-based scan for links pasted as plain text inside chat messages.
-    for selector in _CHAT_SELECTORS:
-        try:
-            for el in page.query_selector_all(selector):
-                text = (el.text_content() or "")
-                for m in _FORM_RE.finditer(text):
-                    links.append(m.group(0))
-        except Exception:  # noqa: BLE001 — DOM shifts are expected
-            continue
-    return list(dict.fromkeys(links))
-
-
-def _extract_captions(page, seen: set[str]) -> list[str]:
-    """New live-caption segments from the captions pane (best-effort DOM)."""
-    new: list[str] = []
-    for selector in _CAPTION_SELECTORS:
-        try:
-            for el in page.query_selector_all(selector):
-                text = (el.text_content() or "").strip()
-                lowered = text.lower()
-                if not text or text in seen:
-                    continue
-                if any(junk in lowered for junk in _CAPTION_JUNK):
-                    seen.add(text)  # UI chrome — remember so it never reports
-                    continue
-                seen.add(text)
-                new.append(text)
-        except Exception:  # noqa: BLE001 — DOM shifts are expected
-            continue
-    return new
-
-
-def _caption_inventory(page) -> dict[str, int]:
-    """One-shot diagnostic: candidate-node counts per caption selector, so a
-    silent run can tell 'nobody spoke' apart from 'selectors match nothing'."""
-    inventory: dict[str, int] = {}
-    for selector in _CAPTION_SELECTORS:
-        try:
-            inventory[selector] = len(page.query_selector_all(selector))
-        except Exception:  # noqa: BLE001 — DOM shifts are expected
-            inventory[selector] = -1
-    return inventory
-
-
-# Media-toggle state detection (pre-join + meeting bar). Teams labels these
-# buttons by CURRENT state: 'Mute mic'/'Turn camera off' render only while
-# LIVE; 'Unmute mic'/'Turn camera on' mean the device is OFF. ACTION phrases
-# take precedence over STATE phrases (run 9 bug: 'turn camera on' contains
-# the state phrase 'camera on' — priority matching turned the camera ON).
-_MEDIA_RE = re.compile(r"camera|video|\bmic\b|microphone", re.IGNORECASE)
-_LIVE_ACTION_RE = re.compile(
-    r"turn (the )?(camera|video|mic|microphone) off|\bmute\b", re.IGNORECASE)
-_DEAD_ACTION_RE = re.compile(
-    r"turn (the )?(camera|video|mic|microphone) on|unmute", re.IGNORECASE)
-_LIVE_STATE_RE = re.compile(
-    r"\b(mic|camera|video)( is)? on\b|with (the )?(camera|mic|microphone) on",
-    re.IGNORECASE)
-_DEAD_STATE_RE = re.compile(
-    r"\b(mic|microphone|camera|video)( is)? off\b", re.IGNORECASE)
-
-
 # _is_login_url / _resolve_link / _direct_meeting_url live in
 # pia_worker.teams._shared (strangler extract 2026-09-22) and are re-exported
 # here so existing imports (tests, autologin, login_save) keep working.
 
-
-def _media_button_should_click(btn) -> bool:  # noqa: ANN001 — playwright handle
-    """True when this aria-labelled button toggles a currently-LIVE device."""
-    with contextlib.suppress(Exception):
-        aria = (btn.get_attribute("aria-label") or "").strip()
-        if not aria or not _MEDIA_RE.search(aria):
-            return False
-        if _LIVE_ACTION_RE.search(aria):
-            return True
-        if _DEAD_ACTION_RE.search(aria):
-            return False
-        if _LIVE_STATE_RE.search(aria):
-            return True
-        if _DEAD_STATE_RE.search(aria):
-            return False
-        pressed = (btn.get_attribute("aria-pressed") or "").lower()
-        if pressed in ("true", "false"):
-            return pressed == "true"
-        # No state signal at all: only a bare toggle label ("Camera",
-        # "Microphone", "Mic") justifies clicking on faith.
-        return bool(re.match(r"(camera|microphone|mic)\b", aria, re.IGNORECASE))
-    return False
-
-
-def _prejoin_state(pg) -> str:  # noqa: ANN001 — playwright sync Page
-    """One-line DOM truth for a pre-join page. Body-text dumps mislead (they
-    include hidden nodes); this reports only what the join loop acts on.
-    Anchored on Teams' STABLE data-tids (live DOM probe 2026-09-12:
-    prejoin-display-name-input / prejoin-join-button / auth-sign-in-link /
-    calling-lobby-screen), legacy selectors as fallback."""
-    parts: list[str] = [f"url={pg.url[:70]}"]
-    with contextlib.suppress(Exception):
-        box = pg.locator("[data-tid='prejoin-display-name-input'],"
-                         " input[placeholder*='name' i]").first
-        if box.count() > 0 and box.is_visible():
-            parts.append(f"name={box.input_value()[:20]!r}")
-        else:
-            parts.append("name=none")
-    with contextlib.suppress(Exception):
-        jn = pg.locator("[data-tid='prejoin-join-button']").first
-        if jn.count() == 0:
-            jn = pg.get_by_role("button", name="Join now",
-                                exact=False).first
-        vis = jn.count() > 0 and jn.is_visible()
-        parts.append(
-            f"joinnow={'on' if vis and jn.is_enabled(timeout=400) else 'off'}")
-    with contextlib.suppress(Exception):
-        si = pg.locator("[data-tid='auth-sign-in-link']").first
-        parts.append(
-            f"signin={'y' if si.count() > 0 and si.is_visible() else 'n'}")
-    with contextlib.suppress(Exception):
-        pc = pg.get_by_text("Privacy and cookies", exact=False).first
-        if pc.count() > 0 and pc.is_visible():
-            # ...but only OUTSIDE the login dialog — probe 5: that dialog's
-            # footer carries the same 'Privacy and cookies' text.
-            try:
-                in_dialog = pg.locator("[role='dialog'] input").count() > 0
-            except Exception:  # noqa: BLE001
-                in_dialog = False
-            parts.append("dialog=y" if in_dialog else "consent=y")
-    with contextlib.suppress(Exception):
-        if pg.locator("[data-tid='calling-lobby-screen']").count() > 0:
-            parts.append("lobby=y")
-    with contextlib.suppress(Exception):
-        lf = sum(1 for fr in pg.frames if _is_login_url(fr.url))
-        if lf:
-            parts.append(f"login_frames={lf}")
-    return " ".join(parts)
-
-
-def _prejoin_status(pg) -> str:  # noqa: ANN001
-    """Normalized visible text of the light-meetings pre-join screen. Carries
-    the device-state phrases the toggles flip ('With camera on/off', 'Mic
-    on/off') — the only state signal, since the toggles themselves are
-    unlabeled. Empty for other pages."""
-    with contextlib.suppress(Exception):
-        t = pg.text_content("[data-tid='calling-prejoin-screen']") or ""
-        return " ".join(t.split()).lower()
-    return ""
-
-
-def _click_signin(pg) -> bool:  # noqa: ANN001
-    """Click the guest pre-join's Sign-in control: data-tid first
-    ('auth-sign-in-link', proven live), then role-/text-EXACT fallbacks.
-    NOT get_by_text(exact=False) — its container matches center-click the
-    wrong element (the bug behind every silent stall since 2026-09-09)."""
-    with contextlib.suppress(Exception):
-        link = pg.locator("[data-tid='auth-sign-in-link']").first
-        if link.count() > 0 and link.is_visible():
-            link.click(timeout=2500)
-            logger.info("prejoin_signin_clicked", via="tid")
-            return True
-    for kind in ("link", "button"):
-        with contextlib.suppress(Exception):
-            sign = pg.get_by_role(kind, name="Sign in", exact=True).first
-            if sign.count() > 0 and sign.is_visible(timeout=600):
-                sign.click(timeout=2500)
-                logger.info("prejoin_signin_clicked", via=kind)
-                return True
-    with contextlib.suppress(Exception):
-        sign = pg.get_by_text("Sign in", exact=True).first
-        if sign.count() > 0 and sign.is_visible(timeout=600):
-            sign.click(timeout=2500)
-            logger.info("prejoin_signin_clicked", via="text-exact")
-            return True
-    return False
-
-
-def _drive_signin_dialog(pg, settings) -> bool:  # noqa: ANN001
-    """Advance the EMBEDDED Microsoft sign-in dialog the pre-join 'Sign in'
-    link opens IN-PAGE (probe 5, 2026-09-12: role=dialog, 'Enter your email
-    or phone number' + Next; no popup, no iframe, no login URL — which is
-    why every login-surface detector missed it and auth never happened).
-    CASES, each detected from the dialog's own content, per cycle:
-      1. 'Enter your email or phone number'  -> fill TEAMS_EMAIL, Next
-      2. 'Pick an account' (cached list)     -> click the LPU row
-      3. password screen                     -> fill TEAMS_PASSWORD, Next
-      4. 'Stay signed in?'                   -> Yes
-      5. MFA / 'Let's confirm it's you'      -> leave open, log for phone
-      6. credentials error                   -> loud warning (owner fixes
-         .env; the guest fallback still joins)
-    Returns True while a dialog is being worked on."""
-    try:
-        dlg = pg.locator("[role='dialog']").first
-        if dlg.count() == 0 or not dlg.is_visible():
-            return False
-        dtxt = (dlg.text_content() or "").lower()
-    except Exception:  # noqa: BLE001
-        return False
-    worked = False
-    if any(k in dtxt for k in ("wrong password", "incorrect password",
-                               "credentials that don't match",
-                               "we couldn't find an account")):
-        logger.error("signin_dialog_credentials_error",
-                     hint="check TEAMS_EMAIL/TEAMS_PASSWORD in "
-                          "infrastructure/.env — joining as guest instead")
-        with contextlib.suppress(Exception):
-            dlg.get_by_role("button", name="Back",
-                            exact=True).first.click(timeout=1500)
-        return False
-    # Case 3: password (checked first — MS can prefill the email and show it)
-    with contextlib.suppress(Exception):
-        pw = dlg.locator("input[type=password]").first
-        if pw.count() > 0 and pw.is_visible() and settings.teams_password:
-            if (pw.input_value() or "") != settings.teams_password:
-                pw.fill(settings.teams_password)
-                logger.info("signin_dialog_password_filled")
-            dlg.get_by_role("button", name=re.compile(
-                r"^(next|sign in)$", re.I)).first.click(timeout=2000)
-            logger.info("signin_dialog_password_submitted")
-            worked = True
-    # Case 1: email/phone input
-    with contextlib.suppress(Exception):
-        em = dlg.locator(
-            "input[type=email], input[name=loginfmt], "
-            "input[type=tel], input[type=text]").first
-        if (not worked and em.count() > 0 and em.is_visible()
-                and settings.teams_email):
-            if (em.input_value() or "") != settings.teams_email:
-                em.fill(settings.teams_email)
-                logger.info("signin_dialog_email_filled",
-                            account=settings.teams_email)
-                dlg.get_by_role("button", name=re.compile(
-                    r"^next$", re.I)).first.click(timeout=2000)
-            worked = True
-    # Case 2: cached-account picker (no input, email rows to click)
-    with contextlib.suppress(Exception):
-        if (not worked and settings.teams_email
-                and ("pick an account" in dtxt
-                     or "choose an account" in dtxt
-                     or settings.teams_email in dtxt)):
-            row = dlg.get_by_text(settings.teams_email,
-                                  exact=False).first
-            if row.count() > 0 and row.is_visible():
-                row.click(timeout=2000)
-                logger.info("signin_dialog_account_picked",
-                            account=settings.teams_email)
-                worked = True
-    # Case 4: 'Stay signed in?'
-    with contextlib.suppress(Exception):
-        yes = dlg.get_by_role("button", name="Yes", exact=True).first
-        if not worked and yes.count() > 0 and yes.is_visible():
-            yes.click(timeout=2000)
-            logger.info("signin_dialog_stay_signed_in_yes")
-            worked = True
-    # Case 5: MFA — surface it; the owner approves on the phone while the
-    # join loop holds the guest join (dialog activity keeps extending it).
-    if not worked and any(k in dtxt for k in ("authenticator",
-                                              "we sent a code",
-                                              "enter the code", "text us",
-                                              "confirm it's you",
-                                              "let's protect your account")):
-        logger.warning("signin_dialog_mfa_pending",
-                       hint="approve on the phone / enter the code")
-        worked = True
-    return worked
-
-
-def _dismiss_consent(pg, steps: dict[int, int]) -> str:  # noqa: ANN001
-    """Close a genuine 'Privacy and cookies' NOTICE flyout if one exists.
-
-    PROBE 5 (2026-09-12) showed the flyout with 'Close | Next | Privacy and
-    cookies' that blocked every join is NOT a notice — it is the EMBEDDED
-    Microsoft sign-in dialog ("Enter your email or phone number" + Next),
-    which _drive_signin_dialog fills. So this only acts when the text appears
-    with NO dialog input present (a real notice), and NEVER while the login
-    dialog is on screen — closing that was the self-sabotage that kept every
-    run on guest identity.
-    """
-    try:
-        head = pg.get_by_text("Privacy and cookies", exact=False).first
-        if head.count() == 0 or not head.is_visible():
-            return ""
-    except Exception:  # noqa: BLE001 — DOM shifted
-        return ""
-    try:
-        if pg.locator("[role='dialog'] input").count() > 0:
-            return ""  # live login dialog — NOT consent, hands off
-    except Exception:  # noqa: BLE001
-        pass
-    accept_words = {"accept all", "accept", "allow all", "i agree",
-                    "confirm choices", "confirm my choices", "got it"}
-    accept_btn = next_btn = close_btn = None
-    buttons: list = []
-    with contextlib.suppress(Exception):
-        buttons = pg.query_selector_all("button")
-    for btn in buttons:
-        with contextlib.suppress(Exception):
-            if not btn.is_visible():
-                continue
-            txt = (btn.text_content() or "").strip().lower()
-            if txt in accept_words and accept_btn is None:
-                accept_btn = btn
-            elif txt == "next" and next_btn is None:
-                next_btn = btn
-            elif txt == "close" and close_btn is None:
-                close_btn = btn
-    if accept_btn is not None:
-        with contextlib.suppress(Exception):
-            accept_btn.click(timeout=2000)
-        logger.info("consent_accepted")
-        return "accepted"
-    if next_btn is not None and steps.get(id(pg), 0) < 1:
-        steps[id(pg)] = 1
-        with contextlib.suppress(Exception):
-            next_btn.click(timeout=2000)
-        logger.info("consent_stepped")
-        return "stepped"
-    if close_btn is not None:
-        with contextlib.suppress(Exception):
-            close_btn.click(timeout=2000)
-        logger.info("consent_flyout_closed")
-        return "closed"
-    return ""
-
-
-def _turn_media_off_prejoin(pg, tries: dict[int, int]) -> None:  # noqa: ANN001
-    """Light-meetings pre-join mic/camera toggles are UNLABELED icon buttons
-    (aria-label/text/data-tid all null — live probe 2026-09-12). Target them
-    by stable data-tid neighbours and VERIFY the screen state text flipped
-    ('With camera on'->'With camera off', 'Mic on'->'Mic off'); a click that
-    does not produce the expected flip is REVERTED, so an errant click can
-    never leave a device ON."""
-    if tries.get(id(pg), 0) >= 4:
-        return
-    status = _prejoin_status(pg)
-    if not status:
-        return
-    tries[id(pg)] = tries.get(id(pg), 0) + 1
-    pending = 0
-    for dev, sel, on_w, off_w in (
-        ("camera", "button:has(+ [data-tid='video-flyout-open-button'])",
-         "with camera on", "with camera off"),
-        ("mic",
-         "xpath=//*[@data-tid='selected-microphone-display']"
-         "/preceding::button[1]", "mic on", "mic off"),
-    ):
-        if off_w in status:
-            continue  # confirmed off
-        if on_w not in status:
-            pending += 1
-            continue  # no state text yet — retry next cycle
-        pending += 1
-        with contextlib.suppress(Exception):
-            btn = pg.locator(sel).first
-            if btn.count() == 0:
-                logger.warning("prejoin_media_control_missing", device=dev)
-                continue
-            btn.click(timeout=2500)
-            pg.wait_for_timeout(1200)
-            after = _prejoin_status(pg)
-            if off_w in after or on_w not in after:
-                logger.info("prejoin_media_off", device=dev)
-            else:  # wrong element — undo, never join with it flipped ON
-                logger.warning("prejoin_media_click_reverted", device=dev)
-                with contextlib.suppress(Exception):
-                    btn.click(timeout=2500)
-    if pending == 0:
-        tries[id(pg)] = 99  # both devices confirmed off
-
-
-def _mute_if_live(page) -> bool:
-    """Post-join safety net. Meeting-bar mic/camera buttons carry the
-    live-state labels 'Mute mic' / 'Turn camera off' (transcripts/
-    controls_menu_* proves they only render while live). Scan every
-    aria-labelled button and click the live ones — exact aria-label logic
-    (role+name substring matching would also hit 'Unmute mic')."""
-    muted = False
-    with contextlib.suppress(Exception):
-        for btn in page.query_selector_all("button[aria-label]"):
-            with contextlib.suppress(Exception):
-                if (btn.is_visible() and btn.is_enabled()
-                        and _media_button_should_click(btn)):
-                    label = (btn.get_attribute("aria-label") or "").strip()
-                    btn.click(timeout=2000)
-                    muted = True
-                    logger.info("media_control_off", control=label[:40])
-    return muted
-
-
-def _open_chat_panel(page) -> None:
-    """Open the DOCKED in-meeting chat panel (toolbar Chat) and stay in the
-    meeting — captions and the chat inbox are then watched together every
-    watch cycle. Clicking the app-shell Chat nav instead leaves the meeting
-    view (mini-window mode): the caption pane unmounts and the transcript
-    comes back empty. Candidates inside a <nav> landmark are therefore
-    skipped; afterwards the meeting bar (Leave) must still be on screen."""
-    try:
-        candidates = page.get_by_role(
-            "button", name=re.compile(r"chat", re.IGNORECASE)).all()
-    except Exception:  # noqa: BLE001 — locator failure falls to legacy path
-        candidates = []
-    for btn in candidates:
-        try:
-            if btn.evaluate("el => el.closest('nav') ? 1 : 0"):
-                continue  # app-shell nav — would leave the meeting
-            if btn.is_visible() and btn.is_enabled():
-                btn.click(timeout=2500)
-                logger.info("meeting_chat_docked")
-                page.wait_for_timeout(1500)
-                break
-        except Exception:  # noqa: BLE001 — try the next candidate
-            continue
-    else:
-        # Legacy single-click path (may land on the app-shell chat page).
-        with contextlib.suppress(Exception):
-            page.get_by_role("button", name="Chat", exact=False).first.click(
-                timeout=2500)
-            logger.info("chat_panel_opened")
-            page.wait_for_timeout(1500)
-    with contextlib.suppress(Exception):
-        if page.get_by_role("button", name="Leave").count():
-            logger.info("stayed_in_meeting")
-        else:
-            logger.warning("meeting_view_lost_after_chat_open")
-
-
-def _dump_controls(page, tag: str) -> list[str]:
-    """Diagnostic: every visible button/menuitem label — saved to the transcripts
-    dir so the exact control names are known for precise clicking."""
-    labels: list[str] = []
-    try:
-        elements = page.query_selector_all("button, [role=menuitem], [role=button]")
-        for el in elements:
-            with contextlib.suppress(Exception):
-                if not el.is_visible():
-                    continue
-                label = ((el.get_attribute("aria-label")
-                          or el.text_content() or "").strip())
-                if label and len(label) < 60:
-                    labels.append(label)
-    except Exception:  # noqa: BLE001 — diagnostics are best-effort
-        pass
-    if labels:
-        dump = _TRANSCRIPT_DIR / f"controls_{tag}_{datetime.now().strftime('%H%M%S')}.txt"
-        dump.parent.mkdir(parents=True, exist_ok=True)
-        dump.write_text("\n".join(dict.fromkeys(labels)), encoding="utf-8")
-    return labels
-
-
-def _captions_on(pg) -> bool:  # noqa: ANN001
-    """Ground truth for captions: the caption pane exists / has content, or a
-    control has flipped to the live 'Turn off captions' state."""
-    for sel in _CAPTION_SELECTORS:
-        with contextlib.suppress(Exception):
-            if pg.locator(sel).count() > 0:
-                return True
-    with contextlib.suppress(Exception):
-        if pg.get_by_role("region",
-                          name=re.compile(r"caption", re.I)).count() > 0:
-            return True
-    with contextlib.suppress(Exception):
-        if pg.get_by_text("turn off captions",
-                          exact=False).first.is_visible():
-            return True
-    with contextlib.suppress(Exception):
-        if pg.get_by_text("turn off live captions",
-                          exact=False).first.is_visible():
-            return True
-    with contextlib.suppress(Exception):
-        if pg.get_by_text("hide live captions",
-                          exact=False).first.is_visible():
-            return True
-    return False
-
-
-def _await_captions(pg, seconds: float = 8.0) -> bool:  # noqa: ANN001
-    end = time.time() + seconds
-    while time.time() < end:
-        if _captions_on(pg):
-            logger.info("captions_enabled_verified")
-            return True
-        with contextlib.suppress(Exception):
-            pg.wait_for_timeout(1000)
-    return False
-
-
-def _click_by_text(pg, label: str) -> bool:  # noqa: ANN001
-    """Click the most button-like element carrying `label` — tried as exact
-    text, accessible NAME (aria-label / nested-span labels — run 10: the More
-    flyout's 'Language and speech'/'Record and transcribe' items have no
-    clickable exact-text node), and loose text. Visible-only, never raises."""
-    rx = re.compile(rf"\b{re.escape(label)}\b", re.I)
-    attempts = (
-        lambda: pg.get_by_text(label, exact=True),
-        lambda: pg.get_by_role("menuitem", name=rx),
-        lambda: pg.get_by_role("button", name=rx),
-        lambda: pg.locator(f"[aria-label*='{label}' i],[title*='{label}' i]"),
-        lambda: pg.get_by_text(label, exact=False),
-    )
-    for make in attempts:
-        with contextlib.suppress(Exception):
-            loc = make().last
-            if loc.count() > 0 and loc.is_visible():
-                loc.click(timeout=2000)
-                logger.info("caption_control_clicked", label=label)
-                return True
-    return False
-
-
-def _try_enable_captions(page) -> bool:
-    """Enable live captions IN THE MEETING — as a TOGGLE-AWARE state machine
-    (run 12 lesson): 'Show live captions' switches ON silently; a second
-    click switches it back OFF. So: check already-on first, click at most ONE
-    toggle per pass with a generous verify window, and let the outer retry
-    re-ladder. NEVER click 'Record and transcribe' — that starts persistent
-    cloud transcription/recording (consent-flagged); the owner wants only
-    transient live captions for the transcript.
-    Owner path (2026-09-12): More → Language and speech → Show live captions."""
-    if _captions_on(page):
-        logger.info("captions_already_on")
-        return True
-    # direct toggle on the bar (if this UI exposes one)
-    for label in ("Show live captions", "Turn on live captions",
-                  "Turn on captions"):
-        if _click_by_text(page, label):
-            return _await_captions(page, seconds=10) or _captions_on(page)
-    # the More flyout path
-    with contextlib.suppress(Exception):
-        # ^More$ ONLY — run 8 evidence: name="More", exact=False matched the
-        # app-shell sidebar's "Settings and more" gear and dumped its menu.
-        page.get_by_role("button", name=re.compile(r"^(more|…)$",
-                                                   re.I)).first.click(
-            timeout=3000)
-        page.wait_for_timeout(1200)  # flyout animation
-        _dump_controls(page, "menu")
-        for entry in ("Captions", "Language and speech"):
-            if not _click_by_text(page, entry):
-                continue
-            if _captions_on(page) or _await_captions(page, seconds=4):
-                return True  # older builds toggle straight from the flyout
-            page.wait_for_timeout(800)
-            _dump_controls(page, "captions_submenu")  # submenu evidence
-            for label in ("Show live captions", "Turn on live captions",
-                          "Turn on captions"):
-                if _click_by_text(page, label):
-                    # ONE toggle click per pass, then verify (allow silence —
-                    # _captions_on also fires on the 'Hide…' label). No
-                    # second click here: the outer retry re-checks
-                    # already-on before touching anything again.
-                    with contextlib.suppress(Exception):
-                        page.keyboard.press("Escape")
-                    return _await_captions(page, seconds=12) \
-                        or _captions_on(page)
-            with contextlib.suppress(Exception):
-                page.keyboard.press("Escape")
-            break  # one entry per pass; next retry starts fresh from More
-        with contextlib.suppress(Exception):
-            page.keyboard.press("Escape")
-    logger.warning("captions_enable_failed")
-    return False
-
-
-def _openrouter_summary(prompt: str) -> str:
-    """Second brain when NIM fails (owner decision 2026-09-12): OpenRouter
-    chat completion, plain text — deliberately simpler than the structured
-    primary path. Best-effort: raises ProviderError for the caller's final
-    raw-transcript fallback. NOTE: the free OpenRouter balance is small, so
-    the transcript cap here is tighter than the NIM prompt's."""
-    settings = get_settings()
-    if not settings.openrouter_api_key:
-        raise ProviderError("openrouter: OPENROUTER_API_KEY not configured")
-    try:
-        response = httpx.post(
-            f"{settings.openrouter_base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {settings.openrouter_api_key}",
-                     "HTTP-Referer": "https://github.com/nitish-niraj/Placement_agent",
-                     "X-Title": "PIA KYC summary fallback"},
-            json={
-                "model": settings.openrouter_model,
-                # ling-3.0-flash-vl is a REASONING model: a small budget can
-                # be consumed entirely by its thinking block, leaving
-                # content=null (hit live in manual testing 2026-09-13).
-                "max_tokens": 1500,
-                "messages": [
-                    {"role": "system", "content": (
-                        "Summarize placement KYC session transcripts for the "
-                        "student: company, role, package if mentioned, key "
-                        "points. Plain text bullets, only facts from the "
-                        "text, under 120 words.")},
-                    {"role": "user", "content": prompt},
-                ],
-            },
-            timeout=60,
-        )
-        response.raise_for_status()
-        content = (response.json()["choices"][0]["message"]["content"]
-                   or "").strip()
-    except Exception as exc:  # noqa: BLE001 — normalized into ProviderError
-        raise ProviderError(f"openrouter: {str(exc)[:180]}") from exc
-    if not content:
-        raise ProviderError("openrouter: empty completion")
-    return content
-
-
-def _groq_summary(prompt: str) -> str:
-    """Third brain when NIM and OpenRouter both fail (DEC-010): Groq's free
-    tier `openai/gpt-oss-120b` (1K requests / 200K tokens per day, tested
-    2026-09-13). Reasoning model — max_completion_tokens must leave headroom
-    or `content` returns null. Raises ProviderError for the final raw
-    fallback."""
-    settings = get_settings()
-    if not settings.groq_api_key:
-        raise ProviderError("groq: GROQ_API_KEY not configured")
-    try:
-        response = httpx.post(
-            f"{settings.groq_base_url.rstrip('/')}/chat/completions",
-            headers={"Authorization": f"Bearer {settings.groq_api_key}",
-                     "Content-Type": "application/json"},
-            json={
-                "model": settings.groq_model,
-                "max_completion_tokens": 1500,
-                "temperature": 0.1,
-                "messages": [
-                    {"role": "system", "content": (
-                        "Summarize placement KYC session transcripts for the "
-                        "student: company, role, package if mentioned, key "
-                        "points. Plain text bullets, only facts from the "
-                        "text, under 120 words.")},
-                    {"role": "user", "content": prompt},
-                ],
-            },
-            timeout=60,
-        )
-        response.raise_for_status()
-        content = (response.json()["choices"][0]["message"]["content"]
-                   or "").strip()
-    except Exception as exc:  # noqa: BLE001 — normalized into ProviderError
-        raise ProviderError(f"groq: {str(exc)[:180]}") from exc
-    if not content:
-        raise ProviderError("groq: empty completion")
-    return content
-
-
-def _summarize(transcript_text: str, form_link: str | None,
-               presenters: tuple[str, ...] = ()) -> str:
-    """LLM summary of the discussion from the captured captions; deterministic
-    fallback returns the raw transcript (source-backed, never invented).
-    `presenters` = names from caption self-introductions (the LLM only picks
-    among them — never invents)."""
-    who = ("Name candidates for the recruiter/teacher who led the session: "
-           + ", ".join(presenters) + ". Say who led it if the text shows it. "
-           if presenters else "")
-    prompt = (
-        "This is the live-captions transcript of a company KYC information "
-        "session. Summarize for the student: the company, the designation/role "
-        "discussed, package/salary if mentioned, and key points. " + who +
-        "Use only this text.\n\nTRANSCRIPT:\n" + transcript_text[:12000]
-    )
-    try:
-        summary: MeetingSummary = NIMProvider().complete_structured(
-            task="kyc_session_summary", system=(
-                "Summarize placement KYC session transcripts. Fill every field "
-                "from the transcript only; leave fields null when not discussed. "
-                "key_points = short bullets. summary = under 120 words."
-            ),
-            user=prompt, schema=MeetingSummary, max_tokens=500,
-        )[0]
-        lines = [f"🏢 {summary.company or 'Company session'} — summary"]
-        if summary.designation_discussed:
-            lines.append(f"💼 Role discussed: {summary.designation_discussed}")
-        if summary.package_mentioned:
-            lines.append(f"💰 Package: {summary.package_mentioned}")
-        lines.extend(f"• {point}" for point in summary.key_points)
-        lines.append(summary.summary)
-        if form_link:
-            lines.append(f"📝 Feedback form: {form_link}")
-        return "\n".join(lines)
-    except ProviderError as exc:
-        logger.warning("summary_llm_unavailable", error=str(exc)[:120])
-        # Fallback ladder (DEC-010, owner order 2026-09-13):
-        # NIM -> OpenRouter -> Groq -> raw transcript. Each rung tags itself
-        # in the message, so you always know which brain answered.
-        # NB: `exc`/`exc2` are deleted at the end of their except blocks in
-        # py3, so persist the reason strings in plain locals to reuse below.
-        nim_error = str(exc)
-        or_error = ""
-        or_prompt = ("TRANSCRIPT:\n" + transcript_text[:4000])
-        try:
-            text = _openrouter_summary(or_prompt)
-            logger.info("summary_openrouter_fallback_used")
-            if form_link:
-                text += f"\n📝 Feedback form: {form_link}"
-            return text + "\n🤖 via OpenRouter (primary NIM failed: " \
-                + nim_error[:60] + ")"
-        except ProviderError as exc2:
-            or_error = str(exc2)
-            logger.warning("summary_openrouter_unavailable",
-                           error=or_error[:160])
-        try:
-            text = _groq_summary(or_prompt)
-            logger.info("summary_groq_fallback_used")
-            if form_link:
-                text += f"\n📝 Feedback form: {form_link}"
-            return text + "\n🤖 via Groq (NIM + OpenRouter failed: " \
-                + or_error[:60] + ")"
-        except ProviderError as exc3:
-            logger.warning("summary_groq_unavailable",
-                           error=str(exc3)[:160])
-        # Final rung — honest raw transcript (source-backed, never invented).
-        head = transcript_text[:1500]
-        tail = f"\n\n📝 Feedback form: {form_link}" if form_link else ""
-        return (f"LLM unavailable — raw transcript (first {len(head)} chars):\n"
-                f"{head}{tail}")
-
-
 # NOTE: _resolve_link / _direct_meeting_url imported from _shared (see top).
-
 
 def listen(meeting_url: str, *, max_minutes: int = 180,
            join_now: bool = True) -> str:
@@ -934,8 +192,9 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
     meeting_url = _direct_meeting_url(_resolve_link(meeting_url))
     if not is_teams_url(meeting_url):
         return "not_a_teams_link"
-    if not _STATE_FILE.exists():
-        return "login_needed: run pia_worker.teams.login_save first"
+    gate = check_session(str(_STATE_FILE))
+    if gate is not None:
+        return gate
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False)  # headed: audio keeps playing
@@ -997,32 +256,8 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
         context.on("page", _on_new_page)
 
         def _drive_login_page(pg) -> None:  # playwright sync Page
-            """Complete a Microsoft login form (popup or same-tab hop)."""
-            with contextlib.suppress(Exception):
-                email_box = pg.locator(
-                    "input[type=email], input[name=loginfmt]").first
-                if (email_box.count() > 0 and email_box.is_visible()
-                        and settings.teams_email):
-                    email_box.fill(settings.teams_email)
-                    pg.locator("#idSIButton9, input[type=submit], "
-                               "button[type=submit]").first.click(timeout=2000)
-                    logger.info("login_email_submitted")
-                    time.sleep(2)
-            with contextlib.suppress(Exception):
-                pw_box = pg.locator("input[type=password]").first
-                if (pw_box.count() > 0 and pw_box.is_visible()
-                        and settings.teams_password):
-                    pw_box.fill(settings.teams_password)
-                    pg.locator("#idSIButton9, input[type=submit], "
-                               "button[type=submit]").first.click(timeout=2000)
-                    logger.info("login_password_submitted")
-                    time.sleep(2)
-            for label in ("Yes", "Next", "Accept"):
-                with contextlib.suppress(Exception):
-                    btn = pg.get_by_role("button", name=label, exact=True).first
-                    if btn.count() > 0 and btn.is_visible():
-                        btn.click(timeout=1500)
-                        logger.info("login_prompt_answered", label=label)
+            """Join-loop alias of the single login driver (auth.py)."""
+            drive_login_page(pg, settings)
 
         joined = False
         joined_page = page
@@ -1143,8 +378,8 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
                                 joined_page = candidate
                                 joined_identity = (
                                     "authenticated"
-                                    if "signin=n" in state
-                                    and "name=none" in state else "guest")
+                                    if is_authenticated_join(state)
+                                    else "guest")
                                 logger.info("joined_as",
                                             identity=joined_identity)
                                 break
@@ -1185,6 +420,9 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
             browser.close()
             return "join_failed"
         logger.info("listener_joined")
+        if joined_identity == "guest":
+            # Expired session lands here silently today — say so once.
+            note_guest_join()
         # Teams can REPLACE the join tab after the auth redirect — run 11's
         # crash: the tab whose 'Join now' we clicked was closed and the next
         # unguarded call threw TargetClosedError, killing the whole run.
@@ -1248,8 +486,26 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
         _open_chat_panel(page)      # form links land in the meeting chat
         # One-shot pane inventory: a silent run can then tell 'nobody spoke'
         # apart from 'selectors match nothing'. Diagnostics never break watch.
+        # A dead pane (all selectors throwing) pages the owner once — Teams
+        # may have renamed the caption DOM and the transcript would be empty.
+        pane_state = "unknown"
+        pane_reason = ""
         with contextlib.suppress(Exception):
-            logger.info("caption_pane_inventory", **_caption_inventory(page))
+            inventory = _caption_inventory(page)
+            logger.info("caption_pane_inventory", **inventory)
+            pane_state, pane_reason = pane_health(inventory)
+            logger.info("caption_pane_health", state=pane_state,
+                        reason=pane_reason)
+        health_alerted = False
+        if pane_state == "dead":
+            health_alerted = True
+            logger.warning("caption_pane_dead", reason=pane_reason)
+            with contextlib.suppress(Exception):
+                _telegram_send(
+                    text="⚠️ Meeting captions look broken — Teams may have "
+                         "changed its layout, so this session's transcript "
+                         "may come back empty. The form-link watch is still "
+                         "running.")
 
         transcript_file = _TRANSCRIPT_DIR / (
             "kyc_" + datetime.now().strftime("%Y%m%d_%H%M") + ".txt")
@@ -1279,6 +535,17 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
                     next_caption_retry = time.time() + 30
                     if _try_enable_captions(page):
                         captions_on = True
+                    elif not health_alerted:
+                        with contextlib.suppress(Exception):
+                            state, _ = pane_health(_caption_inventory(page))
+                            if state == "dead":
+                                health_alerted = True
+                                logger.warning("caption_pane_dead_mid_watch")
+                                _telegram_send(
+                                    text="⚠️ Meeting captions stopped working "
+                                         "mid-session — the transcript may be "
+                                         "incomplete. The form-link watch is "
+                                         "still running.")
                 _drain()
                 for link in _extract_chat_links(page):
                     if link not in relayed:
@@ -1321,7 +588,6 @@ def listen(meeting_url: str, *, max_minutes: int = 180,
                 transcript=str(transcript_file))
     return f"done:{len(relayed)}:form_links:transcript={transcript_file.name}"
 
-
 def main() -> None:
     """CLI: .venv/Scripts/python -m pia_worker.teams.listener "<meeting link>"
     [--minutes N] — joins, watches chat for the feedback form, leaves."""
@@ -1335,7 +601,6 @@ def main() -> None:
     args = parser.parse_args()
     result = listen(args.url, max_minutes=args.minutes)
     print(result)
-
 
 if __name__ == "__main__":
     main()
