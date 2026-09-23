@@ -39,6 +39,7 @@ def _maintenance_loop(client: redis_lib.Redis, interval_hours: int) -> None:
         try:
             queue.enqueue("pia_worker.jobs.process_message.retention_cleanup")
             queue.enqueue("pia_worker.jobs.notify.review_digest")
+            queue.enqueue("pia_worker.companies.resolver.gc_orphan_companies")
         except Exception:  # noqa: BLE001 — scheduler must never crash the worker
             logger.warning("maintenance_enqueue_failed")
         time.sleep(interval)

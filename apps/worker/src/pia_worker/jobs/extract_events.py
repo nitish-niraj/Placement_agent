@@ -72,7 +72,8 @@ def extract_events(message_id: str) -> str:
         text_company = rules.extract_company_from_text(text)
         if text_company:
             with engine.begin() as conn:
-                ref = resolve_company(conn, text_company)
+                # Drive codes are authoritative: mint the row when needed.
+                ref = resolve_company(conn, text_company, create=True)
             if ref is not None:  # resolve_company returns None only for blank input
                 company_id, company_name = ref.company_id, ref.canonical_name
                 company_key = ref.normalized_key

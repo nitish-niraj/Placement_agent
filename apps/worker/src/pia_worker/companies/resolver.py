@@ -6,7 +6,12 @@ Deterministic only — no LLM. Resolution ladder for a printed/mentioned name:
 2. exact alias match (``company_aliases``) -> existing company
 3. token-containment fallback              -> existing company ("Techademy"
    ⊂ "Techademy Learning Solutions Pvt. Ltd.", "Accenture India" ⊃ "Accenture")
-4. no match                                -> create company + register the name
+4. no match                                -> None, unless the caller passes
+   ``create=True`` (drive-code events, eligibility lists, test fixtures).
+
+Creation is opt-in because mention text is noisy: auto-creating a company
+per LLM-extracted mention filled the table with orphan rows nobody ever
+referenced. Orphans are reaped by gc_orphan_companies.
 
 Every resolved name self-heals into ``company_aliases`` (FR-MEM-001: variants
 map to one entity), so step 3 only has to fire once per variant.
@@ -89,10 +94,12 @@ def _ref_from_row(row, via: str) -> CompanyRef:
 
 
 def resolve_company(
-    conn: sqlalchemy.Connection, name: str, create: bool = True
+    conn: sqlalchemy.Connection, name: str, create: bool = False
 ) -> CompanyRef | None:
-    """Resolve a company name (FR-MEM-003) or create it (FR-MEM-001).
-    Returns None only for blank input or create=False with no match."""
+    """Resolve a company name (FR-MEM-003), optionally creating it (FR-MEM-001).
+    Returns None for blank input or (with create=False) no match. Only
+    authoritative signals pass create=True: drive-code events, eligibility
+    lists, and test fixtures — never raw mention text."""
     key = normalize_name(name)
     if not key:
         return None
@@ -203,3 +210,55 @@ def activate_watch(conn: sqlalchemy.Connection, company_id: str) -> dict[str, st
             {"id": company_id, "meta": json.dumps({"changes": changes}, default=str)},
         )
     return changes
+
+
+# Lifecycle note (item 3): the funnel past ELIGIBLE (REGISTRATION → OA → …
+# → SELECTED) is reserved, never auto-advanced — per-role truth lives in
+# application_states (DEC-011), and no writer may invent funnel progress
+# from message text. DISCOVERED → ELIGIBLE above is the only automatic hop.
+
+
+def gc_orphan_companies(max_age_days: int = 7) -> dict[str, int]:
+    """Delete mention-minted companies nobody ever referenced: still
+    DISCOVERED/NONE after the grace period, with no eligibility records, no
+    events, and no application answers. Memory-mention rows are history and
+    stay (subject strings, no FK). Runs from the daily maintenance loop; the
+    grace period makes reruns idempotent and safe."""
+    from pia_worker.jobs.process_message import _engine
+
+    engine = _engine()
+    with engine.begin() as conn:
+        rows = conn.execute(
+            sqlalchemy.text(
+                "SELECT c.id, c.canonical_name FROM companies c "
+                "WHERE c.lifecycle_stage IS NOT DISTINCT FROM 'DISCOVERED' "
+                "AND c.watch_state = 'NONE' "
+                "AND c.created_at < now() - make_interval(days => :days) "
+                "AND NOT EXISTS (SELECT 1 FROM eligibility_records r "
+                "WHERE r.company_id = c.id) "
+                "AND NOT EXISTS (SELECT 1 FROM events v "
+                "WHERE v.company_id = c.id) "
+                "AND NOT EXISTS (SELECT 1 FROM application_states s "
+                "WHERE s.company_id = c.id)"
+            ),
+            {"days": max_age_days},
+        ).mappings().all()
+        for row in rows:
+            conn.execute(
+                sqlalchemy.text(
+                    "DELETE FROM company_aliases "
+                    "WHERE company_id = CAST(:id AS uuid)"
+                ),
+                {"id": str(row["id"])},
+            )
+            conn.execute(
+                sqlalchemy.text(
+                    "DELETE FROM companies WHERE id = CAST(:id AS uuid)"
+                ),
+                {"id": str(row["id"])},
+            )
+    if rows:
+        logger.info("orphan_companies_collected",
+                    count=len(rows),
+                    names=[r["canonical_name"][:40] for r in rows][:10])
+    return {"collected": len(rows)}

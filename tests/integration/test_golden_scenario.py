@@ -81,7 +81,7 @@ def test_golden_scenario_eligible_company_alert_dedup_and_delta(
     now = dt.datetime.now(tz=IST)
     unique = f"golden scenario test co {int(now.timestamp())}"
     with engine.begin() as conn:
-        company_id = resolve_company(conn, unique).company_id
+        company_id = resolve_company(conn, unique, create=True).company_id
         event_id, outcome = upsert_event(
             conn,
             _plan(company_id, unique, now + dt.timedelta(days=2),

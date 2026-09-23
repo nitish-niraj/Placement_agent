@@ -210,3 +210,14 @@ student phone screen — never raw classification fields:
   registrations/info) and sent at most once per day;
 - watcher/dry-run chatter and worker tracebacks never reach your chat —
   internals go to logs and the optional `ADMIN_TELEGRAM_CHAT_ID`.
+
+## Company hygiene + classifier feedback
+
+- Company rows are only created from authoritative signals (drive codes,
+  eligibility lists) — stray mentions no longer mint orphans, and a daily
+  job reaps unreferenced ones after a 7-day grace period.
+- The funnel past `ELIGIBLE` is retired: per-role truth lives in
+  application-state answers, not auto-advanced stages.
+- Wrong category on a message? Record it for corpus curation:
+  `POST /api/v1/feedback/classification` (predicted-vs-correct, audited;
+  history is never rewritten, promotion stays manual).

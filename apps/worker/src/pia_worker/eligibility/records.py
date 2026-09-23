@@ -66,8 +66,9 @@ def load_identity_profile(conn: sqlalchemy.Connection) -> tuple[IdentityProfile,
 
 def resolve_company(conn: sqlalchemy.Connection, company_name: str) -> str:
     """Delegates to the F-017 resolver (aliases + containment fallback). The
-    P6-era inline creation lived here; the company module owns it now."""
-    ref = resolve_company_ref(conn, company_name)
+    P6-era inline creation lived here; the company module owns it now.
+    Candidate lists are authoritative: unknown list owners get a row."""
+    ref = resolve_company_ref(conn, company_name, create=True)
     if ref is None:
         raise ValueError(f"cannot resolve blank company name: {company_name!r}")
     return ref.company_id

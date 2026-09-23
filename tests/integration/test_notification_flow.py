@@ -189,7 +189,7 @@ class TestDefaulterFlow:
         company_id = ''
         try:
             with engine.begin() as conn:
-                company_id = resolve_company(conn, company).company_id
+                company_id = resolve_company(conn, company, create=True).company_id
             text = (f"Candidates who applied for {company} must complete "
                     "verification before Friday.")
             chain = _message_chain(engine, company_id, "flow-group", text,
@@ -229,7 +229,7 @@ class TestDefaulterFlow:
         company_id = ''
         try:
             with engine.begin() as conn:
-                company_id = resolve_company(conn, company).company_id
+                company_id = resolve_company(conn, company, create=True).company_id
             text = (f"List of the defaulters who are yet not registered on "
                     f"the {company} platform. Fill the account creation form.")
             chain = _message_chain(engine, company_id, "flow-group", text,
@@ -259,7 +259,7 @@ class TestDefaulterFlow:
         company_id = ''
         try:
             with engine.begin() as conn:
-                company_id = resolve_company(conn, company).company_id
+                company_id = resolve_company(conn, company, create=True).company_id
             text = (f"Candidates who applied for {company} must complete "
                     "verification.")
             # in_list=None: extraction exists, match never ran (still loading).
@@ -292,7 +292,7 @@ class TestDeadlineAndDigest:
         company_id = ''
         try:
             with engine.begin() as conn:
-                company_id = resolve_company(conn, company).company_id
+                company_id = resolve_company(conn, company, create=True).company_id
                 now = dt.datetime.now(tz=IST)
                 event_plan = EventPlan(
                     event_type=EventType.REGISTRATION, company_id=company_id,
@@ -323,7 +323,7 @@ class TestDeadlineAndDigest:
         company_id = ''
         try:
             with engine.begin() as conn:
-                company_id = resolve_company(conn, company).company_id
+                company_id = resolve_company(conn, company, create=True).company_id
                 event_plan = EventPlan(
                     event_type=EventType.OTHER, company_id=company_id,
                     company_key=company,
