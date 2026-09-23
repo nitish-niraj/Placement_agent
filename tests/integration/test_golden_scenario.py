@@ -1,7 +1,7 @@
 """P10 capstone — golden E2E scenario (master §20.2 / 03_App_Flow F10).
 
-Runs against the live compose stack (marked integration). Telegram delivery is
-stubbed so the test asserts BEHAVIOR, not chat noise:
+Runs on an isolated scratch database (no live-data contact). Telegram
+delivery is stubbed so the test asserts BEHAVIOR, not chat noise:
 
     steps 6-7:  eligible company + new event  -> exactly ONE HIGH alert
     step 12-13: the same announcement repeats -> suppressed by dedup
@@ -76,6 +76,7 @@ def _plan(company_id: str | None, company_key: str | None,
 
 def test_golden_scenario_eligible_company_alert_dedup_and_delta(
     stub_delivery: list[str],
+    isolated_db: str,
 ) -> None:
     engine = _engine()
     now = dt.datetime.now(tz=IST)

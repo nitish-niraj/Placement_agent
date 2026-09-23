@@ -2,6 +2,11 @@
 
     docker compose -f infrastructure/docker-compose.yml up -d
     PIA_RUN_INTEGRATION=1 pytest -m integration
+
+NOTE: this file intentionally stays on the LIVE stack (HTTP-level
+deployment verification, including a synthetic webhook delivery). DB-level
+suites (golden, notification_flow) run on isolated scratch databases via
+the isolated_db fixture in conftest.py.
 """
 
 import os

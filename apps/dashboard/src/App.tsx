@@ -2,6 +2,8 @@ import { useEffect, useState } from "react";
 import { HashRouter, Link, NavLink, Route, Routes } from "react-router-dom";
 import { getToken, setToken, useApi, clearToken } from "./api";
 import { Approvals } from "./screens/Approvals";
+import { Applications } from "./screens/Applications";
+import { Feedback } from "./screens/Feedback";
 import { Companies, CompanyTimeline, Timeline } from "./screens/Companies";
 import { Documents, Eligibility, Inbox, Notifications } from "./screens/Lists";
 import { Audit, Profile, Settings } from "./screens/Profile";
@@ -42,7 +44,8 @@ function Login({ onDone }: { onDone: () => void }) {
 const NAV = [
   ["/", "Overview"], ["/ask", "Ask PIA"], ["/approvals", "Approvals"], ["/companies", "Companies"],
   ["/timeline", "Timeline"], ["/inbox", "Inbox"], ["/documents", "Documents"],
-  ["/notifications", "Notifications"], ["/eligibility", "Eligibility"], ["/profile", "Profile"],
+  ["/notifications", "Notifications"], ["/eligibility", "Eligibility"], ["/applications", "Applications"],
+  ["/feedback", "Feedback"], ["/profile", "Profile"],
   ["/settings", "Settings"], ["/audit", "Audit"],
 ] as const;
 
@@ -96,6 +99,8 @@ export default function App() {
           <Route path="/documents" element={<Documents />} />
           <Route path="/notifications" element={<Notifications />} />
           <Route path="/eligibility" element={<Eligibility />} />
+          <Route path="/applications" element={<Applications />} />
+          <Route path="/feedback" element={<Feedback />} />
           <Route path="/profile" element={<Profile />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="/audit" element={<Audit />} />
