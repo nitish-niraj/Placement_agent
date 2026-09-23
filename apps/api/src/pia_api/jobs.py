@@ -38,6 +38,9 @@ def enqueue_process_message(message_id: str, correlation_id: str = "",
 
 
 def enqueue_download_attachment(attachment_id: str, delay_seconds: int = 0) -> None:
+    # Exponential-ish backoff: transient infra failures (MinIO/DB blips)
+    # deserve spaced retries; permanent states fail fast in-job instead.
+    backoff = Retry(max=5, interval=[60, 300, 900, 1800, 3600])
     if delay_seconds > 0:
         import datetime as _dt
 
@@ -45,13 +48,13 @@ def enqueue_download_attachment(attachment_id: str, delay_seconds: int = 0) -> N
             _dt.timedelta(seconds=delay_seconds),
             "pia_worker.jobs.process_message.download_attachment",
             attachment_id,
-            retry=Retry(max=5),
+            retry=backoff,
         )
         return
     _queue().enqueue(
         "pia_worker.jobs.process_message.download_attachment",
         attachment_id,
-        retry=Retry(max=5),
+        retry=backoff,
     )
 
 

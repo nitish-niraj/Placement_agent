@@ -55,9 +55,9 @@ from pia_worker.notify.decide import (
 )
 from pia_worker.notify.render import (
     render_ask_applied,
-    render_digest,
     render_eligibility_alert,
-    render_event_alert,
+    render_event,
+    render_event_updated,
     render_reminder,
 )
 from pia_worker.settings import get_settings
@@ -77,10 +77,11 @@ def _load_event(conn: sqlalchemy.Connection, event_id: str) -> dict | None:
         sqlalchemy.text(
             "SELECT e.id, e.type, e.deadline_at, e.start_at, e.company_id, "
             "e.current_payload, e.group_id, c.canonical_name AS company, "
-            "c.normalized_key AS company_key, "
+            "c.normalized_key AS company_key, d.state AS deadline_state, "
             "c.watch_state, g.name AS group_name FROM events e "
             "LEFT JOIN companies c ON c.id = e.company_id "
             "LEFT JOIN groups g ON g.id = e.group_id "
+            "LEFT JOIN deadlines d ON d.event_id = e.id "
             "WHERE e.id = CAST(:id AS uuid)"
         ),
         {"id": event_id},
@@ -168,7 +169,78 @@ def _enqueue_send(notification_id: str) -> None:
     )
 
 
-def _send_ask_nudge(engine, event: dict, payload: dict, state_hash: str,
+def _build_resolved_context(engine, event: dict, payload: dict,  # noqa: ANN001
+                            eligible: bool, app_row: dict | None,
+                            decision_reason: str = ""):
+    """Context-first object for one event notification: subject, topic,
+    verification, deadline truth, recommendation + evidence chain."""
+    from pia_worker.notify.context import (
+        AttachmentVerification,
+        build_context,
+    )
+    from pia_worker.notify.topics import classify_topic
+
+    message_id = payload.get("source_message_id")
+    company_id = event["company_id"] and str(event["company_id"])
+    with engine.connect() as conn:
+        verification, detail = app_records.resolve_verification(
+            conn, message_id, company_id)
+    excerpt = payload.get("excerpt") or ""
+    topic = classify_topic(excerpt)
+    subject = (payload.get("subject_display") or event["company"]
+               or "📋 Placement Update")
+    role = payload.get("designation")
+    location = payload.get("venue") or payload.get("job_location")
+    status = (ApplicationStatus(app_row["status"]) if app_row
+              else ApplicationStatus.UNKNOWN)
+    return build_context(
+        event_id=str(event["id"]), company=event["company"],
+        subject_display=subject, role=role,
+        event_type=str(event["type"]), topic=topic,
+        action_required=is_post_application_shaped(
+            analyze_application_message(excerpt)),
+        eligibility_status="ELIGIBLE" if eligible else "UNKNOWN",
+        application_status=status.value,
+        deadline=event["deadline_at"], location=location,
+        source_message=excerpt,
+        source_message_id=message_id, source_group=event["group_name"],
+        attachments=(),
+        verification=AttachmentVerification(verification),
+        attachment_detail=detail,
+        confidence=1.0 if event["company_id"] else 0.5,
+        reason=decision_reason,
+    )
+
+
+def _latest_delta(engine, event_id: str,  # noqa: ANN001
+                  message_id: str | None) -> dict:
+    """Newest material delta for this event (prefer the triggering message's
+    row). Empty dict = describe the event itself instead."""
+    with engine.connect() as conn:
+        if message_id:
+            row = conn.execute(
+                sqlalchemy.text(
+                    "SELECT delta FROM event_updates "
+                    "WHERE event_id = CAST(:eid AS uuid) "
+                    "AND source_message_id = CAST(:mid AS uuid) "
+                    "ORDER BY detected_at DESC LIMIT 1"
+                ),
+                {"eid": event_id, "mid": message_id},
+            ).mappings().first()
+            if row is not None and row["delta"]:
+                return dict(row["delta"])
+        row = conn.execute(
+            sqlalchemy.text(
+                "SELECT delta FROM event_updates "
+                "WHERE event_id = CAST(:eid AS uuid) "
+                "ORDER BY detected_at DESC LIMIT 1"
+            ),
+            {"eid": event_id},
+        ).mappings().first()
+    return dict(row["delta"]) if row is not None and row["delta"] else {}
+
+
+def _send_ask_nudge(engine, event: dict, payload: dict, state_hash: str,  # noqa: ANN001
                     outcome: str, app_row: dict | None) -> str:
     """Ask-whether-applied nudge with answer buttons. One per event state
     (dedup kind "ask_applied"); the answer persists the opportunity row, so
@@ -216,6 +288,9 @@ def notify_event(event_id: str, outcome: str = "created") -> str:
             logger.warning("notify_event_missing", event_id=event_id)
             return "missing"
         eligible = _company_eligible(conn, event["company_id"] and str(event["company_id"]))
+    if not get_settings().notification_enabled:
+        logger.info("notification_disabled_by_flag", event_id=event_id)
+        return "disabled"
 
     payload = event["current_payload"] or {}
     state_hash = material_state_hash(
@@ -261,6 +336,8 @@ def notify_event(event_id: str, outcome: str = "created") -> str:
         has_company=event["company_id"] is not None,
         company_eligible=eligible,
         company_watching=(event["watch_state"] == "WATCHING"),
+        deadline_state=str(event["deadline_state"])
+        if event["deadline_state"] is not None else None,
     )
     decision = priority_for_event(ctx)
     if verdict == "proceed_boost" and app_decision is not None:
@@ -294,11 +371,24 @@ def notify_event(event_id: str, outcome: str = "created") -> str:
         return "suppressed_policy"
 
     if delivery == "digest":
+        digest_ctx = _build_resolved_context(
+            engine, event, payload, eligible, app_row,
+            decision_reason=decision.reason)
         with engine.begin() as conn:
             notification_id, is_new = notify_records.insert_notification(
                 conn, dedup_key=key, priority=decision.priority,
-                reason=decision.reason, payload={"outcome": outcome},
-                evidence_refs=[], event_id=str(event["id"]),
+                reason=f"[{digest_ctx.stage}] {digest_ctx.recommendation_text}",
+                payload={"outcome": outcome,
+                         "subject": digest_ctx.subject_display,
+                         "stage": digest_ctx.stage,
+                         "topic": digest_ctx.topic.value,
+                         "deadline": digest_ctx.deadline.isoformat()
+                         if digest_ctx.deadline else None,
+                         "recommendation": digest_ctx.recommendation.value,
+                         "recommendation_text": digest_ctx.recommendation_text,
+                         "reason": digest_ctx.reason},
+                evidence_refs=[dict(r) for r in digest_ctx.evidence_refs],
+                event_id=str(event["id"]),
                 message_id=payload.get("source_message_id"),
                 status=NotificationStatus.PENDING,  # awaiting the digest job
             )
@@ -310,38 +400,36 @@ def notify_event(event_id: str, outcome: str = "created") -> str:
                     priority=decision.priority.value)
         return DIGEST_QUEUED
 
-    # CRITICAL/HIGH: render now, persist, deliver via the retried job.
-    alert = render_event_alert(
-        priority=decision.priority, company=event["company"],
-        event_type=EventType(event["type"]).value,
-        what_changed=("Event details updated (delta)" if outcome == "delta"
-                      else "New announcement for this event"),
-        why_me=decision.reason,
-        deadline_at=event["deadline_at"], start_at=event["start_at"],
-        venue=payload.get("venue"), source_group=event["group_name"],
-        designation=payload.get("designation"),
-        salary_package=payload.get("salary_package"),
-        job_location=payload.get("job_location"),
-        eligibility_note=payload.get("eligibility_note"),
-        links=payload.get("links") or [],
-        source_excerpt=payload.get("excerpt"),
-        source_message_id=payload.get("source_message_id"),
-        event_id=str(event["id"]),
-    )
+    # CRITICAL/HIGH: build the context-first object, render the
+    # student-facing template, persist, deliver via the retried job.
+    resolved = _build_resolved_context(
+        engine, event, payload, eligible, app_row,
+        decision_reason=decision.reason)
+    links = tuple(payload.get("links") or [])
+    if outcome == "delta":
+        delta = _latest_delta(engine, str(event["id"]),
+                              payload.get("source_message_id"))
+        alert = render_event_updated(resolved, delta, links)
+    else:
+        alert = render_event(resolved, links, payload.get("salary_package"))
     with engine.begin() as conn:
         notification_id, is_new = notify_records.insert_notification(
             conn, dedup_key=key, priority=decision.priority,
-            reason=decision.reason,
-            payload={"text": alert.text, "outcome": outcome},
+            reason=f"[{resolved.stage}] {resolved.recommendation_text}",
+            payload={"text": alert.text, "outcome": outcome,
+                     "subject": resolved.subject_display,
+                     "stage": resolved.stage,
+                     "topic": resolved.topic.value,
+                     "recommendation": resolved.recommendation.value},
             evidence_refs=alert.evidence_refs, event_id=str(event["id"]),
             message_id=payload.get("source_message_id"),
         )
     if not is_new:
-        logger.info("notification_suppressed_dedup", event_id=event_id,
+        logger.info("notification_deduplicated", event_id=event_id,
                     dedup_key=key[:12])
         return "suppressed_dedup"
     _enqueue_send(notification_id)
-    logger.info("notification_queued_immediate", event_id=event_id,
+    logger.info("notification_created", event_id=event_id,
                 priority=decision.priority.value, reason=decision.reason)
     return f"queued:{decision.priority.value}"
 
@@ -355,6 +443,10 @@ def send_notification(notification_id: str) -> str:
         return "missing"
     if NotificationStatus(row["status"]) is NotificationStatus.SENT:
         return "already"  # idempotent re-run after retry
+    if not settings.notification_enabled:
+        logger.info("notification_disabled_by_flag",
+                    notification_id=notification_id)
+        return "disabled"
 
     try:
         result = _channel().send(settings.telegram_chat_id, row["payload"]["text"],
@@ -495,8 +587,11 @@ def _escalation_gated(conn: sqlalchemy.Connection, row) -> bool:  # noqa: ANN001
 
 def deadline_escalations() -> dict[str, int]:
     """FR-NOT-005: one reminder per crossed window per deadline value.
-    Runs right after the P8 sweep (same cadence)."""
+    Runs right after the P8 deadline sweep (same cadence)."""
     settings = get_settings()
+    if not settings.notification_enabled:
+        logger.info("escalations_disabled_by_flag")
+        return {"reminders_sent": 0}
     now = datetime.now(tz=ZoneInfo(settings.app_timezone))
     engine = _engine()
     sent = 0
@@ -524,6 +619,7 @@ def deadline_escalations() -> dict[str, int]:
                 has_company=row["company_id"] is not None,
                 company_eligible=eligible,
                 company_watching=(row["watch_state"] == "WATCHING"),
+                deadline_state=str(row["state"]),
             )
             decision = priority_for_event(ctx, now)
             windows = reminder_windows(
@@ -582,28 +678,41 @@ def deadline_escalations() -> dict[str, int]:
 
 
 def daily_digest() -> str:
-    """F-025: compose the digest from PENDING MEDIUM/LOW notifications only
-    (canonical events); empty digest is suppressed (FR-NOT-006)."""
+    """F-025: categorized digest from PENDING MEDIUM/LOW notifications.
+
+    Idempotent per calendar day: a `digest:{date}` anchor in idempotency_keys
+    makes double-runs (retry-after-send, overlapping schedulers) a quiet
+    "duplicate" instead of a second Telegram message. Empty digest stays
+    suppressed (FR-NOT-006)."""
+    from pia_worker.notify.render import render_digest_v2
+
     settings = get_settings()
+    if not settings.digest_enabled:
+        logger.info("digest_disabled_by_flag")
+        return "disabled"
     engine = _engine()
+    today = datetime.now(tz=ZoneInfo(settings.app_timezone)).date().isoformat()
+    anchor = f"digest:{today}"
+    with engine.begin() as conn:
+        claimed = conn.execute(
+            sqlalchemy.text(
+                "INSERT INTO idempotency_keys (key, fingerprint, entity_ref) "
+                "VALUES (:key, :fp, :ref) ON CONFLICT (key) DO NOTHING "
+                "RETURNING key"
+            ),
+            {"key": anchor, "fp": anchor, "ref": "daily_digest"},
+        ).first()
+        if claimed is None:
+            logger.info("digest_skipped_duplicate", date=today)
+            return "duplicate"
     with engine.connect() as conn:
         items = notify_records.pending_digest_items(conn)
     if not items:
         logger.info("digest_empty_suppressed")
         return "empty"
 
-    sections: dict[str, list[str]] = {}
-    ids: list[str] = []
-    for item in items:
-        event_type = (item["event_type"] or "OTHER").replace("_", " ").title()
-        company = item["company"] or "General"
-        topic = f"{company} · {event_type}"
-        sections.setdefault(topic, []).append(
-            (item["payload"] or {}).get("reason") or item["reason"]
-        )
-        ids.append(str(item["id"]))
-
-    text = render_digest(list(sections.items()))
+    ids = [str(item["id"]) for item in items]
+    text = render_digest_v2(today, [dict(item) for item in items])
     if text is None:
         logger.info("digest_empty_suppressed")
         return "empty"
@@ -615,5 +724,5 @@ def daily_digest() -> str:
             logger.warning("digest_delivery_failed", error=str(exc)[:120])
             return "delivery_failed"
         notify_records.mark_digest_sent(conn, ids, "digest")
-    logger.info("digest_sent", items=len(ids), sections=len(sections))
+    logger.info("digest_created", items=len(ids), date=today)
     return f"sent:{len(ids)}"

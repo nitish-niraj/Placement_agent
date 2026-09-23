@@ -66,6 +66,7 @@ def _event(event_type: str, excerpt: str,
             "salary_package": None,
         },
         "company": "Accenture", "company_key": "accenture",
+        "deadline_state": None,
         "watch_state": "NONE", "group_name": "placements",
     }
 

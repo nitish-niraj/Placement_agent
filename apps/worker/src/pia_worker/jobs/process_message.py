@@ -23,6 +23,11 @@ from minio import Minio
 from pia_shared.enums import AttachmentState, Importance, MessageState, MsgDomain
 from pia_shared.media import MEDIA_KEYS
 from pia_shared.states import assert_valid_transition
+from pia_worker.media_refetch import (
+    RefetchUnavailable,
+    extract_wa_key_id,
+    fetch_base64_from_evolution,
+)
 from pia_worker.settings import get_settings
 
 logger = structlog.get_logger()
@@ -240,6 +245,11 @@ def _link_companies(
 # --- attachments (FR-WA-006) ---------------------------------------------------
 
 
+class _MediaMissing(Exception):
+    """No inline bytes in the stored payload — the refetch ladder (Evolution
+    store) runs before anything is declared permanently missing."""
+
+
 def _fetch_media_bytes(data: dict) -> bytes:
     """Media bytes come inline from the stored webhook payload: Evolution is
     configured with webhook base64=true, so the message content object carries a
@@ -258,10 +268,60 @@ def _fetch_media_bytes(data: dict) -> bytes:
             return _decode_base64(str(media["base64"]))
     if data.get("base64"):
         return _decode_base64(str(data["base64"]))
-    raise PermanentJobError(
+    raise _MediaMissing(
         "media content missing in stored payload (webhook base64 enabled after "
         "this message arrived)"
     )
+
+
+def _refetch_or_fail(engine, attachment_id: str, data: dict) -> bytes | None:  # noqa: ANN001
+    """Recovery ladder Case 1: inline bytes missing → Evolution store refetch.
+
+    Returns bytes on success, None after marking FAILED (codes below are
+    terminal — the stored row is immutable, so retrying is pointless).
+    Transport-level failures propagate for RQ backoff retries.
+    """
+    settings = get_settings()
+    key_id = extract_wa_key_id(data)
+    if (not settings.attachment_retry_enabled or not settings.evolution_base_url
+            or not settings.evolution_api_key or not key_id):
+        logger.info("attachment_download_retry",
+                    attachment_id=attachment_id, attempt="refetch_skipped",
+                    reason="disabled_or_unconfigured_or_no_key")
+        _mark_attachment_failed(engine, attachment_id, "base64_missing:unrecoverable")
+        return None
+    logger.info("attachment_download_retry", attachment_id=attachment_id,
+                attempt="evolution_refetch")
+    try:
+        return fetch_base64_from_evolution(
+            base_url=settings.evolution_base_url,
+            api_key=settings.evolution_api_key,
+            instance=settings.evolution_instance_name,
+            wa_key_id=key_id)
+    except RefetchUnavailable as exc:
+        logger.warning("attachment_refetch_unavailable",
+                       attachment_id=attachment_id, error=str(exc)[:120])
+        _mark_attachment_failed(
+            engine, attachment_id, "evolution_media_not_stored:unrecoverable")
+        return None
+
+
+def _mark_attachment_failed(engine, attachment_id: str, code: str) -> str:  # noqa: ANN001
+    """Terminal FAILED with a machine-readable code — observable in the DB and
+    logs, never retried, never DLQ-spammed to the student channel."""
+    with engine.begin() as conn:
+        conn.execute(
+            sqlalchemy.text(
+                "UPDATE attachments SET processing_state = "
+                "CAST('FAILED' AS attachment_state), "
+                "failure_reason = :reason, updated_at = now() "
+                "WHERE id = CAST(:id AS uuid)"
+            ),
+            {"id": attachment_id, "reason": code},
+        )
+    logger.warning("attachment_download_failed", attachment_id=attachment_id,
+                   code=code)
+    return "failed"
 
 
 def _decode_base64(value: str) -> bytes:
@@ -292,7 +352,8 @@ def download_attachment(attachment_id: str) -> str:
             {"id": attachment_id},
         ).first()
         if row is None:
-            raise PermanentJobError(f"attachment {attachment_id} does not exist")
+            logger.warning("download_attachment_missing_row", attachment_id=attachment_id)
+            return "missing"
         if AttachmentState(row.processing_state) is AttachmentState.PROCESSED:
             return "already"
         message_id = str(row.message_id)
@@ -317,12 +378,22 @@ def download_attachment(attachment_id: str) -> str:
             {"id": message_id},
         ).first()
     if payload_row is None:
-        raise PermanentJobError(f"no raw payload retained for message {message_id}")
+        return _mark_attachment_failed(
+            engine, attachment_id, "no_raw_payload:unrecoverable")
     data = payload_row.payload.get("data") if isinstance(payload_row.payload, dict) else None
     if not isinstance(data, dict):
-        raise PermanentJobError(f"raw payload for message {message_id} has no data object")
+        return _mark_attachment_failed(
+            engine, attachment_id, "no_data_object:unrecoverable")
 
-    content = _fetch_media_bytes(data)
+    try:
+        content = _fetch_media_bytes(data)
+        logger.info("attachment_download_started", attachment_id=attachment_id,
+                    source="inline_base64")
+    except _MediaMissing:
+        refetched = _refetch_or_fail(engine, attachment_id, data)
+        if refetched is None:
+            return "failed"
+        content = refetched
 
     max_bytes = settings.media_max_size_mb * 1024 * 1024
     if len(content) > max_bytes:
@@ -381,6 +452,73 @@ def download_attachment(attachment_id: str) -> str:
     return "stored"
 
 
+def retry_attachment(attachment_id: str) -> str:
+    """Manual re-drive for a FAILED attachment (post-backfill recovery):
+    FAILED -> PENDING + re-enqueue the download. Terminal codes are cleared
+    so the attempt starts clean; the outcome re-marks the row."""
+    from redis import Redis
+    from rq import Queue
+
+    from pia_worker.queue import DEFAULT_QUEUE
+
+    settings = get_settings()
+    engine = _engine()
+    with engine.begin() as conn:
+        row = conn.execute(
+            sqlalchemy.text(
+                "SELECT processing_state::text AS state FROM attachments "
+                "WHERE id = CAST(:id AS uuid)"
+            ),
+            {"id": attachment_id},
+        ).first()
+        if row is None:
+            return "missing"
+        if row.state != "FAILED":
+            return f"not_failed:{row.state}"
+        conn.execute(
+            sqlalchemy.text(
+                "UPDATE attachments SET processing_state = "
+                "CAST('PENDING' AS attachment_state), failure_reason = NULL, "
+                "updated_at = now() WHERE id = CAST(:id AS uuid)"
+            ),
+            {"id": attachment_id},
+        )
+    Queue(DEFAULT_QUEUE,
+          connection=Redis.from_url(settings.redis_url)).enqueue(
+        "pia_worker.jobs.process_message.download_attachment", attachment_id)
+    logger.info("attachment_retry_enqueued", attachment_id=attachment_id)
+    return "requeued"
+
+
+def reap_stuck_attachments(max_age_hours: int = 2) -> dict[str, int]:
+    """Legacy poison rows (and crash orphans) sit in DOWNLOADING forever with
+    NULL failure_reason. Reap them to terminal FAILED so they are observable
+    instead of misleading. Runs hourly from the sweep loop."""
+    engine = _engine()
+    with engine.begin() as conn:
+        rows = conn.execute(
+            sqlalchemy.text(
+                "SELECT id FROM attachments "
+                "WHERE processing_state = CAST('DOWNLOADING' AS attachment_state) "
+                "AND updated_at < now() - make_interval(hours => :hours)"
+            ),
+            {"hours": max_age_hours},
+        ).mappings().all()
+        for row in rows:
+            conn.execute(
+                sqlalchemy.text(
+                    "UPDATE attachments SET processing_state = "
+                    "CAST('FAILED' AS attachment_state), "
+                    "failure_reason = 'reaped_stuck_downloading', "
+                    "updated_at = now() WHERE id = CAST(:id AS uuid)"
+                ),
+                {"id": str(row["id"])},
+            )
+    if rows:
+        logger.warning("attachments_reaped_stuck", count=len(rows))
+    return {"reaped": len(rows)}
+
+
 # --- retention (SEC-007) --------------------------------------------------------
 
 
@@ -405,7 +543,8 @@ def retention_cleanup() -> dict[str, int]:
             sqlalchemy.text(
                 "SELECT id, storage_key FROM attachments "
                 "WHERE retention_expires_at IS NOT NULL "
-                "AND retention_expires_at < :c AND processing_state != 'PENDING'"
+                "AND retention_expires_at < :c AND processing_state IN "
+                "('PROCESSED', 'FAILED', 'REJECTED_OVERSIZE', 'NEEDS_REVIEW')"
             ),
             {"c": doc_cutoff},
         ).mappings().all()

@@ -104,21 +104,26 @@ def _resolve_live_page(context, old):  # noqa: ANN001
 
 
 def _telegram_send(*, text: str | None = None, photo: bytes | None = None,
-                   caption: str | None = None) -> bool:
-    """One Telegram door: sendMessage or sendPhoto. Best-effort, never fatal."""
+                   caption: str | None = None,
+                   chat_id: str | None = None) -> bool:
+    """One Telegram door: sendMessage or sendPhoto. Best-effort, never fatal.
+    `chat_id` overrides the student channel (ops/admin routing) — callers
+    without one reach the student, so internal traces must never be passed
+    without an explicit admin chat."""
     settings = get_settings()
+    target = chat_id or settings.telegram_chat_id
     base = f"https://api.telegram.org/bot{settings.telegram_bot_token}"
     try:
         if photo is not None:
             httpx.post(
                 f"{base}/sendPhoto",
-                data={"chat_id": settings.telegram_chat_id,
+                data={"chat_id": target,
                       "caption": caption or ""},
                 files={"photo": photo}, timeout=30)
         else:
             httpx.post(
                 f"{base}/sendMessage",
-                data={"chat_id": settings.telegram_chat_id,
+                data={"chat_id": target,
                       "text": text or "", "parse_mode": "HTML",
                       "disable_web_page_preview": "true"},
                 timeout=20)

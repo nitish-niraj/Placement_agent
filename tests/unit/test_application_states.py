@@ -185,3 +185,77 @@ class TestListGate:
     def test_missing_message_is_no_list(self) -> None:
         assert rec.message_list_gate(FakeConn(self._script_no_list), None,
                                      "comp-1") == "no_list"
+
+
+class TestResolveVerification:
+    """Strict states: missing files never become ABSENT verdicts."""
+
+    def _conn(self, attachments, extractions, record):
+        def script(sql: str, params: dict | None):
+            if "FROM attachments a WHERE message_id" in sql:
+                return FakeResult(mappings_list=attachments)
+            if "FROM document_extractions" in sql:
+                return FakeResult(mappings_list=extractions)
+            if "FROM eligibility_records WHERE" in sql:
+                return FakeResult(mapping=record)
+            return FakeResult()
+        return FakeConn(script)
+
+    def _list(self):
+        return [{"structured_payload":
+                 {"detection": {"is_candidate_list": True}},
+                 "needs_review": False}]
+
+    def test_no_attachments_is_not_relevant(self) -> None:
+        state, _ = rec.resolve_verification(self._conn([], [], None),
+                                            "m", "c")
+        assert state == "NOT_RELEVANT"
+
+    def test_present_names_identifier(self) -> None:
+        conn = self._conn([{"id": "a", "file_name": "l.csv",
+                            "state": "PROCESSED"}],
+                          self._list(),
+                          {"state": "ELIGIBLE", "method": "IDENTIFIER",
+                           "confidence": 1.0})
+        state, detail = rec.resolve_verification(conn, "m", "c")
+        assert state == "USER_PRESENT"
+        assert "identifier" in detail
+
+    def test_absent_names_no_match(self) -> None:
+        conn = self._conn([{"id": "a", "file_name": "l.csv",
+                            "state": "PROCESSED"}],
+                          self._list(),
+                          {"state": "NOT_FOUND", "method": None,
+                           "confidence": 0.0})
+        state, detail = rec.resolve_verification(conn, "m", "c")
+        assert state == "USER_ABSENT"
+        assert "no match" in detail
+
+    def test_failed_download_is_not_available_never_absent(self) -> None:
+        conn = self._conn([{"id": "a", "file_name": "l.csv",
+                            "state": "FAILED"}], [], None)
+        state, _ = rec.resolve_verification(conn, "m", "c")
+        assert state == "NOT_AVAILABLE"
+
+    def test_unprocessed_is_not_available(self) -> None:
+        conn = self._conn([{"id": "a", "file_name": "l.csv",
+                            "state": "DOWNLOADING"}], [], None)
+        state, _ = rec.resolve_verification(conn, "m", "c")
+        assert state == "NOT_AVAILABLE"
+
+    def test_list_without_match_run_is_not_available(self) -> None:
+        conn = self._conn([{"id": "a", "file_name": "l.csv",
+                            "state": "PROCESSED"}],
+                          self._list(), None)
+        state, detail = rec.resolve_verification(conn, "m", "c")
+        assert state == "NOT_AVAILABLE"
+        assert "not yet run" in detail
+
+    def test_ambiguous_is_parse_failed(self) -> None:
+        conn = self._conn([{"id": "a", "file_name": "l.csv",
+                            "state": "PROCESSED"}],
+                          self._list(),
+                          {"state": "AMBIGUOUS", "method": "FUZZY",
+                           "confidence": 0.91})
+        state, _ = rec.resolve_verification(conn, "m", "c")
+        assert state == "PARSE_FAILED"

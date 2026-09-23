@@ -47,6 +47,9 @@ class EventPlan:
     salary_package: str | None = None  # stipend/CTC as printed
     job_location: str | None = None
     eligibility_note: str | None = None
+    subject_display: str | None = None  # student-facing entity (never "General")
+    subject_evidence: str | None = None  # resolved_mention | attachment_filename |
+    # topic_token | drive_code | none — display-only, never dedup input
 
     def payload(self) -> dict:
         return {
@@ -60,6 +63,8 @@ class EventPlan:
             "salary_package": self.salary_package,
             "job_location": self.job_location,
             "eligibility_note": self.eligibility_note,
+            "subject_display": self.subject_display,
+            "subject_evidence": self.subject_evidence,
         }
 
 
@@ -90,3 +95,27 @@ def material_delta(
             delta[drive_field] = {"from": old_payload.get(drive_field),
                                   "to": new_value}
     return delta
+
+
+# Reminder-shaped LLM action descriptions carry no new fact — normalizing
+# them to None keeps "BANGMETRIC registration" + "BANGMETRIC gentle
+# reminder" on ONE canonical event (near-match compares action text).
+# Everything else passes through verbatim (live sample: register/attend/
+# submit + a few full sentences — never merged).
+_REMINDER_ACTIONS = frozenset({
+    "reminder", "reminders", "gentle reminder", "kind reminder",
+    "friendly reminder", "remainder", "update", "updates", "fyi",
+    "please note", "note", "gentle remainder",
+})
+
+
+def normalize_action(action: str | None) -> str | None:
+    """Canonical action form for the near-match lookup. Empty/whitespace and
+    reminder-family descriptions collapse to None; all real actions stay
+    exactly as observed (never merged, never invented)."""
+    if action is None:
+        return None
+    cleaned = " ".join(str(action).split()).strip(" .!:-").lower()
+    if not cleaned or cleaned in _REMINDER_ACTIONS:
+        return None
+    return " ".join(str(action).split())

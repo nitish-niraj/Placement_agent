@@ -158,7 +158,9 @@ async def evolution_webhook(
     # must not fail the webhook — the message stays VALIDATED (visible, re-driveable).
     # Burst shaping: over-budget groups get scheduled delays (never drops).
     from pia_api.jobs import enqueue_download_attachment, enqueue_process_message
+    from pia_api.settings import get_settings as _api_settings
 
+    analyze_attachments = _api_settings().attachment_analysis_enabled
     shaped = 0
     for message_id, attachment_id, group_key in to_enqueue:
         try:
@@ -166,8 +168,11 @@ async def evolution_webhook(
             if delay:
                 shaped += 1
             enqueue_process_message(message_id, correlation_id, delay_seconds=delay)
-            if attachment_id:
+            if attachment_id and analyze_attachments:
                 enqueue_download_attachment(attachment_id, delay_seconds=delay)
+            elif attachment_id:
+                logger.info("attachment_enqueue_skipped_disabled",
+                            message_id=message_id)
         except Exception as exc:
             logger.error("enqueue_failed", message_id=message_id, error=str(exc))
     if shaped:

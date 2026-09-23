@@ -127,7 +127,46 @@ def upsert_event(
 def upsert_deadline(conn: sqlalchemy.Connection, event_id: str,
                     due_at: datetime) -> str:
     """FR-EVT-003: one deadline per event (UNIQUE); a delta just moves due_at.
-    State transitions stay with the sweep job."""
+    State transitions stay with the sweep job — except a material MOVE, which
+    re-arms the deadline: state back to OPEN (via the reschedule edges) and
+    reminders_sent cleared, so the new date gets its own T-24/6/1h cycle."""
+    existing = conn.execute(
+        sqlalchemy.text(
+            "SELECT due_at, state::text AS state FROM deadlines "
+            "WHERE event_id = CAST(:eid AS uuid)"
+        ),
+        {"eid": event_id},
+    ).mappings().first()
+    if existing is not None:
+        old_due = existing["due_at"]
+        if old_due is not None and old_due.tzinfo is None:
+            from zoneinfo import ZoneInfo
+            old_due = old_due.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+        old_state = str(existing["state"])
+        if (old_due is not None and old_due != due_at
+                and old_state in ("OPEN", "DUE_SOON", "EXPIRED")):
+            assert_valid_transition("deadline", DeadlineState(old_state),
+                                    DeadlineState.OPEN)
+            conn.execute(
+                sqlalchemy.text(
+                    "UPDATE deadlines SET due_at = :due, state = "
+                    "CAST('OPEN' AS deadline_state), reminder_policy = "
+                    "CAST('{\"windows_hours\": [24, 6, 1]}' AS jsonb), "
+                    "reminders_sent = CAST('[]' AS jsonb), updated_at = now() "
+                    "WHERE event_id = CAST(:eid AS uuid) RETURNING id"
+                ),
+                {"eid": event_id, "due": due_at},
+            )
+            moved_id = conn.execute(
+                sqlalchemy.text(
+                    "SELECT id FROM deadlines WHERE event_id = CAST(:eid AS uuid)"
+                ),
+                {"eid": event_id},
+            ).scalar_one()
+            _audit(conn, "deadline.moved", str(moved_id),
+                   {"from": existing["due_at"].isoformat(),
+                    "to": due_at.isoformat(), "old_state": old_state})
+            return str(moved_id)
     row = conn.execute(
         sqlalchemy.text(
             "INSERT INTO deadlines (event_id, due_at, state) "

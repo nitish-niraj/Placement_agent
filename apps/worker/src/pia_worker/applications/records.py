@@ -243,3 +243,82 @@ def message_list_gate(
         {"msg": message_id},
     ).first()
     return "eligible" if any_hit is not None else "not_found"
+
+
+def resolve_verification(
+    conn: sqlalchemy.Connection, message_id: str | None,
+    company_id: str | None,
+) -> tuple[str, str]:
+    """Attachment verification for list-dependent decisions.
+
+    Returns (state, detail) with state in USER_PRESENT / USER_ABSENT /
+    NOT_AVAILABLE / PARSE_FAILED / NOT_RELEVANT. Strict rules:
+    - NOT_AVAILABLE is never reported as USER_ABSENT (missing file proves
+      nothing — the caller must not conclude anything from it);
+    - "no parsed rows" is PARSE_FAILED, never USER_ABSENT;
+    - no attachments, or attachments that are not candidate lists, is
+      NOT_RELEVANT (the message does not depend on a list).
+    """
+    from pia_worker.notify.context import AttachmentVerification
+
+    if not message_id:
+        return (AttachmentVerification.NOT_RELEVANT.value,
+                "no source message")
+    attachments = conn.execute(
+        sqlalchemy.text(
+            "SELECT a.id, a.file_name, a.processing_state::text AS state "
+            "FROM attachments a WHERE message_id = CAST(:msg AS uuid)"
+        ),
+        {"msg": message_id},
+    ).mappings().all()
+    if not attachments:
+        return (AttachmentVerification.NOT_RELEVANT.value,
+                "no attachments on message")
+    extractions = conn.execute(
+        sqlalchemy.text(
+            "SELECT d.structured_payload, d.needs_review FROM document_extractions d "
+            "JOIN attachments a ON a.id = d.attachment_id "
+            "WHERE a.message_id = CAST(:msg AS uuid)"
+        ),
+        {"msg": message_id},
+    ).mappings().all()
+    lists = [r for r in extractions
+             if ((r["structured_payload"] or {}).get("detection") or {}).get(
+                 "is_candidate_list")]
+    if not lists:
+        if extractions:
+            return (AttachmentVerification.PARSE_FAILED.value,
+                    "attachment parsed but no candidate list detected")
+        failed = [a for a in attachments
+                  if (a["state"] or "") == "FAILED"]
+        if failed:
+            return (AttachmentVerification.NOT_AVAILABLE.value,
+                    "attachment download failed — status unverifiable")
+        return (AttachmentVerification.NOT_AVAILABLE.value,
+                "attachment not yet processed — status unverifiable")
+    clauses = ["source_message_id = CAST(:msg AS uuid)"]
+    params: dict[str, object] = {"msg": message_id}
+    if company_id:
+        clauses.append("company_id = CAST(:company AS uuid)")
+        params["company"] = company_id
+    record = conn.execute(
+        sqlalchemy.text(
+            "SELECT state::text AS state, match_method::text AS method, "
+            "confidence FROM eligibility_records WHERE " + " AND ".join(clauses)
+            + " ORDER BY created_at DESC LIMIT 1"
+        ),
+        params,
+    ).mappings().first()
+    if record is None:
+        return (AttachmentVerification.NOT_AVAILABLE.value,
+                "list parsed but identity match not yet run")
+    state = str(record["state"])
+    if state in ("ELIGIBLE", "USER_CONFIRMED"):
+        return (AttachmentVerification.USER_PRESENT.value,
+                f"matched via {(record['method'] or 'IDENTIFIER').lower()} "
+                f"(confidence {record['confidence']})")
+    if state == "NOT_FOUND":
+        return (AttachmentVerification.USER_ABSENT.value,
+                "identity compared against list rows — no match")
+    return (AttachmentVerification.PARSE_FAILED.value,
+            f"match state {state} — needs review, proves nothing")

@@ -109,6 +109,16 @@ class Settings(BaseSettings):
     # master §11 policy flags (wire-up completed in the fixed-code backlog)
     notify_critical_immediately: bool = True
     notify_medium_in_digest: bool = True
+    # Notification pipeline master switches (all default-on except debug).
+    notification_enabled: bool = True  # False = pipeline runs, nothing is sent
+    digest_enabled: bool = True
+    attachment_analysis_enabled: bool = True  # False = skip download/parse chain
+    attachment_retry_enabled: bool = True  # False = no Evolution refetch attempts
+    test_message_filter_enabled: bool = True  # watcher/dry-run noise -> IGNORE
+    debug_notifications_enabled: bool = False  # True = admin channel gets traces
+    # Ops channel for worker internals (DLQ summaries). Empty = same channel
+    # as the student, but redacted to one plain-language line (never traces).
+    admin_telegram_chat_id: str = ""
 
     @model_validator(mode="after")
     def enforce_action_kill_switch(self) -> "Settings":

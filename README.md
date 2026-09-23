@@ -193,3 +193,20 @@ Company mentioned ≠ you applied. When eligibility is established, PIA asks
 - anything else (openings, other roles, lists without your name) stays quiet
   — attached CSV/image lists lacking your name strictly suppress FORM/KYC/
   registration notifications, drafts, and reminders.
+
+## Notification pipeline (DEC-012)
+
+Every alert is built from a normalized context (subject, topic, attachment
+verification, deadline truth, recommendation, evidence) and rendered for a
+student phone screen — never raw classification fields:
+
+- subjects resolve company → attachment filename → topic token (e.g. MARS)
+  → `📋 Placement Update`; "General" is gone;
+- defaulter lists are verified row-by-row: in-list → `🔴 ACTION REQUIRED`,
+  absent → silence, unverifiable → `⚠️ VERIFICATION NEEDED` (never a guess);
+- deadlines render truthfully (`⚫ EXPIRED — passed on …`, never stale
+  "TODAY"); unknown stays "Not specified";
+- the digest is categorized (action/deadlines/interviews/tests/
+  registrations/info) and sent at most once per day;
+- watcher/dry-run chatter and worker tracebacks never reach your chat —
+  internals go to logs and the optional `ADMIN_TELEGRAM_CHAT_ID`.

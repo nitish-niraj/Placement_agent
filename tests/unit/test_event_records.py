@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from pia_shared.enums import EventType
-from pia_worker.events.canonical import canonical_key
+from pia_worker.events.canonical import canonical_key, normalize_action
 from pia_worker.events.records import EventPlan, decide_deadline_state, material_delta
 
 NOW = datetime(2026, 9, 6, 19, 0, tzinfo=ZoneInfo("Asia/Kolkata"))
@@ -89,3 +89,22 @@ class TestDeadlineSweepDecision:
         due = NOW + timedelta(days=5)
         for state in ("EXPIRED", "CANCELLED", "COMPLETED"):
             assert decide_deadline_state(state, due, NOW, (24, 6, 1)) is None
+
+
+class TestNormalizeAction:
+    """Reminder-shaped descriptions merge; real actions never merge."""
+
+    def test_none_and_blank(self) -> None:
+        assert normalize_action(None) is None
+        assert normalize_action("   ") is None
+
+    def test_reminder_family_collapses(self) -> None:
+        for text in ("Gentle Reminder", "reminder", "kind reminder!",
+                     "  Friendly Reminder  ", "update", "FYI"):
+            assert normalize_action(text) is None, text
+
+    def test_real_actions_preserved_verbatim(self) -> None:
+        for text in ("register", "attend",
+                     "Report to the venue 5 minutes before the scheduled time.",
+                     "Submit a video answering the given questions"):
+            assert normalize_action(text) == " ".join(text.split()), text

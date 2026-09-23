@@ -119,11 +119,14 @@ DEADLINE_TRANSITIONS: dict[DeadlineState, set[DeadlineState]] = {
         DeadlineState.COMPLETED,
     },
     DeadlineState.DUE_SOON: {
+        DeadlineState.OPEN,  # rescheduled out of the window (audited move)
         DeadlineState.EXPIRED,
         DeadlineState.CANCELLED,
         DeadlineState.COMPLETED,
     },
-    DeadlineState.EXPIRED: set(),
+    DeadlineState.EXPIRED: {
+        DeadlineState.OPEN,  # rescheduled to a future date (audited move)
+    },
     DeadlineState.CANCELLED: set(),
     DeadlineState.COMPLETED: set(),
 }

@@ -148,5 +148,23 @@
   "domain": "PLACEMENT",
   "importance": "HIGH",
   "source": "real-captured"
+ },
+ {
+  "text": "watcher self-test ALERT-TEST ping",
+  "domain": "GENERAL",
+  "importance": "IGNORE",
+  "source": "synthetic-system-noise"
+ },
+ {
+  "text": "Dry run of the digest job, ignore this",
+  "domain": "GENERAL",
+  "importance": "IGNORE",
+  "source": "synthetic-system-noise"
+ },
+ {
+  "text": "List of the defaulters who are yet not registered on the MARS platforms",
+  "domain": "GENERAL",
+  "importance": "MEDIUM",
+  "source": "synthetic-defaulter"
  }
 ]

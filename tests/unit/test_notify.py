@@ -174,3 +174,37 @@ class TestChannel:
         except DeliveryError:
             raised = True
         assert raised
+
+
+class TestDeadlineTruth:
+    """Past deadlines are EXPIRED (never TODAY/CRITICAL), even same-day."""
+
+    def test_yesterday_is_expired_digest(self) -> None:
+        d = priority_for_event(
+            ctx(deadline_at=NOW - timedelta(days=1)), NOW)
+        assert d.priority is NotificationPriority.LOW
+        assert d.delivery == "digest"
+        assert "EXPIRED" in d.reason
+
+    def test_midnight_today_at_7pm_is_expired(self) -> None:
+        d = priority_for_event(
+            ctx(deadline_at=NOW.replace(hour=0, minute=0)), NOW)
+        assert d.priority is NotificationPriority.LOW
+        assert "TODAY" not in d.reason
+
+    def test_future_today_stays_critical(self) -> None:
+        d = priority_for_event(
+            ctx(deadline_at=NOW.replace(hour=23, minute=0)), NOW)
+        assert d.priority is NotificationPriority.CRITICAL
+        assert "TODAY" in d.reason
+
+    def test_sweep_expired_state_wins(self) -> None:
+        d = priority_for_event(
+            ctx(deadline_at=NOW + timedelta(days=3),
+                deadline_state="EXPIRED"), NOW)
+        assert d.priority is NotificationPriority.LOW
+        assert "EXPIRED" in d.reason
+
+    def test_no_deadline_unaffected(self) -> None:
+        d = priority_for_event(ctx(), NOW)
+        assert d.priority is NotificationPriority.HIGH

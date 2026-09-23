@@ -63,6 +63,17 @@ ACADEMIC_HINTS = re.compile(
 )
 
 
+def _test_filter_enabled() -> bool:
+    """TEST_MESSAGE_FILTER_ENABLED (default on). Local import: settings must
+    never be pulled into pure-rule import time for tooling."""
+    try:
+        from pia_worker.settings import get_settings
+
+        return get_settings().test_message_filter_enabled
+    except Exception:  # noqa: BLE001 — fail open to filtering
+        return True
+
+
 def classify_rules(
     text: str, group_category: GroupCategory | None = None
 ) -> tuple[MsgDomain, Importance]:
@@ -70,6 +81,13 @@ def classify_rules(
     stripped = (text or "").strip()
     if not stripped:
         return MsgDomain.UNKNOWN, Importance.IGNORE
+    # Watcher/dry-run/health-check chatter never enters the pipeline —
+    # GENERAL/IGNORE skips entities, events, and the reactive judgment.
+    # (Bare "test" is NOT a marker: assessment language must survive.)
+    from pia_worker.notify.topics import is_system_test
+
+    if _test_filter_enabled() and is_system_test(stripped):
+        return MsgDomain.GENERAL, Importance.IGNORE
     if IGNORE_PATTERNS.search(stripped) and len(stripped) < 80:
         return MsgDomain.GENERAL, Importance.IGNORE
 

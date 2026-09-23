@@ -3,9 +3,12 @@
 RQ's failed registry is memory-only institutional knowledge: entries vanish on
 a Redis restart (exactly what happened to 214 dead jobs) with no trace of why
 the pipeline bled. This hourly scan persists continuity itself in Redis
-(survives restarts now that AOF is on) and Telegram-alerts only genuinely NEW
-failures — func breakdown plus short error tails — so the next flood arrives
-as a message, not a mystery. It never deletes anything (conservative)."""
+(survives restarts now that AOF is on) and routes genuinely NEW failures to
+observability — structured logs always, full detail to the optional admin
+channel. The student channel NEVER receives exception text, tracebacks, job
+names, or queue internals: those are not placement information. The one
+student-facing line is a plain-language stale-heartbeat note (delivery may
+be affected), because that one is actually about their alerts."""
 
 import json
 
@@ -25,6 +28,10 @@ logger = structlog.get_logger()
 _STATE_KEY = "dlq:watch:last"
 _MAX_TRACKED = 500
 _TAIL_CHARS = 300
+
+_STUDENT_HEARTBEAT_NOTE = (
+    "⚠️ Placement alerts may be delayed — the background worker looks stale. "
+    "Your data is safe; this usually resolves on its own.")
 
 
 def _snapshot(client) -> list[dict]:
@@ -117,7 +124,11 @@ def scan_failed_jobs() -> dict:
     sections = []
     if new_failures:
         sections.append(_summarize(new_failures))
-        logger.warning("dlq_growth", new=len(new_failures), failed=len(current))
+        logger.warning("dlq_growth", new=len(new_failures), failed=len(current),
+                       detail=" | ".join(
+                           f"{f['func'].split('.')[-1]}: "
+                           f"{(f['error'].splitlines() or ['?'])[-1][:140]}"
+                           for f in new_failures[:5]))
     deep = {name: depth for name, depth in depths.items()
             if depth >= settings.watch_queue_depth_threshold}
     if deep:
@@ -126,11 +137,21 @@ def scan_failed_jobs() -> dict:
     if heartbeat_stale:
         age = "missing" if heartbeat_age is None else f"{heartbeat_age:.0f}s old"
         sections.append(f"💔 worker heartbeat stale ({age}) — process may be down")
+
+    # Routing: internals go to the admin channel (or logs only when it is
+    # not configured). The student channel gets at most the plain-language
+    # heartbeat note — never func names, traces, or queue internals.
+    admin_chat = (settings.admin_telegram_chat_id or "").strip()
+    debug = settings.debug_notifications_enabled
+    try:
+        if sections and (admin_chat or debug):
+            _telegram_send(text="\n".join(sections),
+                           chat_id=admin_chat or None)
+        if heartbeat_stale:
+            _telegram_send(text=_STUDENT_HEARTBEAT_NOTE)
+    except Exception as exc:  # noqa: BLE001 — alerting must not fail scan
+        logger.warning("watchdog_alert_failed", error=str(exc)[:120])
     if sections:
-        try:
-            _telegram_send(text="\n".join(sections))
-        except Exception as exc:  # noqa: BLE001 — alerting must not fail scan
-            logger.warning("watchdog_alert_failed", error=str(exc)[:120])
         return {"failed": len(current), "new": len(new_failures),
                 "max_depth": max_depth, "heartbeat_stale": heartbeat_stale}
     return {"failed": len(current), "new": 0,

@@ -54,6 +54,7 @@ def _deadline_sweep_loop(client: redis_lib.Redis, interval_minutes: int) -> None
         try:
             queue.enqueue("pia_worker.jobs.extract_events.deadline_state_sweep")
             queue.enqueue("pia_worker.jobs.watchdog.scan_failed_jobs")
+            queue.enqueue("pia_worker.jobs.process_message.reap_stuck_attachments")
         except Exception:  # noqa: BLE001 — scheduler must never crash the worker
             logger.warning("deadline_sweep_enqueue_failed")
         time.sleep(interval)

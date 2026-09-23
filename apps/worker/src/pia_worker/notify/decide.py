@@ -1,6 +1,7 @@
 """P10 notification decision core (F-023, FR-NOT-001..005) — pure functions.
 
 Master §11 priority ladder (deterministic; code owns decisions, ADR-004):
+0. passed deadline (EXPIRED, even same-day) -> LOW digest ("passed on …")
 1. KYC events                              -> CRITICAL (mandatory KYC)
 2. deadline TODAY (Asia/Kolkata)           -> CRITICAL ("Deadline today")
 3. start/reporting time within 24h         -> CRITICAL ("exam/reporting time")
@@ -25,6 +26,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from pia_shared.enums import EventType, NotificationPriority
+from pia_worker.notify.context import DeadlineStatus, deadline_status
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -43,6 +45,7 @@ class EventContext:
     has_company: bool = False
     company_eligible: bool = False  # eligibility ELIGIBLE/USER_CONFIRMED
     company_watching: bool = False  # watch_state == WATCHING
+    deadline_state: str | None = None  # sweep truth when the caller joins it
 
 
 @dataclass(frozen=True)
@@ -59,12 +62,24 @@ def _ist(now: datetime) -> datetime:
 def priority_for_event(ctx: EventContext, now: datetime | None = None) -> Decision:
     now_ist = _ist(now or datetime.now(tz=IST))
 
+    # Deadline truth first: a passed deadline is EXPIRED even on the same
+    # calendar date — it must never read "TODAY"/CRITICAL again. Sweep state
+    # wins when the caller joined it; otherwise compare against now.
+    if ctx.deadline_at is not None:
+        state = ctx.deadline_state
+        if state is None:
+            state = deadline_status(ctx.deadline_at, now_ist).value
+        if state == DeadlineStatus.EXPIRED.value:
+            passed = ctx.deadline_at.astimezone(IST).strftime("%d %b %Y, %I:%M %p IST")
+            return Decision(NotificationPriority.LOW, "digest",
+                            f"⚫ EXPIRED — deadline passed on {passed}")
+
     if ctx.event_type is EventType.KYC:
         return Decision(NotificationPriority.CRITICAL, "immediate",
                         "Company arrival session — your listener can join and brief you; " +
                         "post-selection sessions you always attend yourself (DEC-008)")
-    if ctx.deadline_at is not None and ctx.deadline_at.astimezone(IST).date() \
-            == now_ist.date():
+    if (ctx.deadline_at is not None and ctx.deadline_at > now_ist
+            and ctx.deadline_at.astimezone(IST).date() == now_ist.date()):
         base = "Deadline is TODAY"
         if ctx.company_eligible or ctx.company_watching:
             return Decision(NotificationPriority.CRITICAL, "immediate",

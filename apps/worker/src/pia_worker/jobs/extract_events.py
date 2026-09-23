@@ -18,6 +18,7 @@ import structlog
 from pia_shared.textnorm import normalize_name
 from pia_worker.companies.resolver import resolve_company
 from pia_worker.events import rules
+from pia_worker.events.canonical import normalize_action
 from pia_worker.events.dateparse import deadline_from_hit, parse_date_mentions
 from pia_worker.events.records import EventPlan, sweep_deadlines, upsert_deadline, upsert_event
 from pia_worker.jobs.process_message import PermanentJobError, _engine
@@ -76,6 +77,30 @@ def extract_events(message_id: str) -> str:
                 company_id, company_name = ref.company_id, ref.canonical_name
                 company_key = ref.normalized_key
 
+    # --- subject: what is this actually about? Resolved company first, then
+    # the attachment filename, then an ALL-CAPS topic token (MARS), then an
+    # honest fallback — never the blind string "General".
+    with engine.begin() as conn:
+        file_row = conn.execute(
+            sqlalchemy.text(
+                "SELECT file_name FROM attachments "
+                "WHERE message_id = CAST(:id AS uuid) "
+                "ORDER BY created_at LIMIT 1"
+            ),
+            {"id": message_id},
+        ).first()
+        from pia_worker.companies.subject import identify_subject
+
+        subject = identify_subject(
+            conn, text=text, company_id=company_id,
+            canonical=company_name,
+            file_name=str(file_row.file_name)
+            if file_row is not None and file_row.file_name else None,
+        )
+        logger.info("event_subject_identified", message_id=message_id,
+                    display=subject.display, evidence=subject.evidence,
+                    confidence=subject.confidence)
+
     # --- dates (FR-EVT-002/005): deadline context wins; occurrence dates land
     # in start_at. No parseable date -> both stay None. Never invented.
     received_at = message["received_at"]
@@ -95,8 +120,11 @@ def extract_events(message_id: str) -> str:
 
     entities = classification.get("entities") or {}
     actions = entities.get("actions") or []
-    action = (actions[0].get("description") or actions[0].get("type")) \
+    raw_action = (actions[0].get("description") or actions[0].get("type")) \
         if actions else None
+    # Reminder-shaped descriptions ("gentle reminder") carry no new fact —
+    # normalize before planning so re-announcements merge into one event.
+    action = normalize_action(raw_action)
 
     drive_fields = rules.extract_drive_fields(text)
 
@@ -104,7 +132,7 @@ def extract_events(message_id: str) -> str:
         event_type=event_type,
         company_id=company_id,
         company_key=company_key,
-        title=f"{company_name or 'General'} — "
+        title=f"{subject.display} — "
               f"{event_type.value.replace('_', ' ').title()}",
         action=action,
         deadline_at=deadline_at,
@@ -118,6 +146,8 @@ def extract_events(message_id: str) -> str:
         salary_package=drive_fields.get("salary_package"),
         job_location=drive_fields.get("job_location"),
         eligibility_note=drive_fields.get("eligibility_note"),
+        subject_display=subject.display,
+        subject_evidence=subject.evidence,
     )
 
     with engine.begin() as conn:
