@@ -180,7 +180,7 @@ def _cleanup(engine, company_id: str, event_ids: list[str],
 
 class TestDefaulterFlow:
     def test_present_csv_gets_action_alert(
-            self, stub_delivery: list[str]) -> None:
+            self, stub_delivery: list[str], isolated_db: str) -> None:
         engine = _engine()
         user_id = _user_id(engine)
         company = _unique("flowco present")
@@ -220,7 +220,7 @@ class TestDefaulterFlow:
                      [chain["message_id"]] if chain else [],
                      [chain["group_id"]] if chain else [])
 
-    def test_absent_csv_suppressed(self, stub_delivery: list[str]) -> None:
+    def test_absent_csv_suppressed(self, stub_delivery: list[str], isolated_db: str) -> None:
         engine = _engine()
         user_id = _user_id(engine)
         company = _unique("flowco absent")
@@ -250,7 +250,7 @@ class TestDefaulterFlow:
                      [chain["group_id"]] if chain else [])
 
     def test_missing_attachment_no_false_verdict(
-            self, stub_delivery: list[str]) -> None:
+            self, stub_delivery: list[str], isolated_db: str) -> None:
         engine = _engine()
         user_id = _user_id(engine)
         company = _unique("flowco missing")
@@ -285,7 +285,7 @@ class TestDefaulterFlow:
 
 class TestDeadlineAndDigest:
     def test_expired_deadline_never_today(
-            self, stub_delivery: list[str]) -> None:
+            self, stub_delivery: list[str], isolated_db: str) -> None:
         engine = _engine()
         company = _unique("flowco expired")
         event_ids: list[str] = []
@@ -316,7 +316,7 @@ class TestDeadlineAndDigest:
             _cleanup(engine, company_id, event_ids, [], [])
 
     def test_digest_sent_once(self, stub_delivery: list[str],
-                              monkeypatch) -> None:
+                              monkeypatch, isolated_db: str) -> None:
         engine = _engine()
         company = _unique("flowco digest")
         event_ids: list[str] = []

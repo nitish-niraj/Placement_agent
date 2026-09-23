@@ -58,7 +58,9 @@ JOBS = [FakeJob("a", "pia_worker.jobs.process_message.download_attachment"),
 def _settings(admin: str = "", debug: bool = False) -> SimpleNamespace:
     return SimpleNamespace(
         watch_queue_depth_threshold=300, watch_heartbeat_stale_seconds=300,
-        admin_telegram_chat_id=admin, debug_notifications_enabled=debug)
+        admin_telegram_chat_id=admin, debug_notifications_enabled=debug,
+        evolution_base_url="", evolution_api_key="",
+        evolution_instance_name="pia")
 
 
 def _wire(monkeypatch: pytest.MonkeyPatch, jobs, seen=None,
@@ -70,6 +72,8 @@ def _wire(monkeypatch: pytest.MonkeyPatch, jobs, seen=None,
     if seen is not None:
         redis.store[wd._STATE_KEY] = json.dumps(seen)
     redis.store["pia:worker:heartbeat"] = dt.datetime.now(
+        dt.UTC).isoformat()
+    redis.store[wd._ASK_HEARTBEAT_KEY] = dt.datetime.now(
         dt.UTC).isoformat()
     redis.fail_get = fail_get
     FakeQueue.depths = {}
@@ -102,7 +106,7 @@ class TestWatchdog:
         _, sent = _wire(monkeypatch, JOBS)
         result = wd.scan_failed_jobs()
         assert result == {"failed": 2, "new": 2, "max_depth": 0,
-                          "heartbeat_stale": False}
+                          "heartbeat_stale": False, "ask_stale": False, "evolution": "unknown"}
         assert sent == []  # no admin channel: internals stay in logs
 
     def test_second_scan_is_quiet(self, monkeypatch) -> None:
@@ -111,24 +115,39 @@ class TestWatchdog:
         sent.clear()
         result = wd.scan_failed_jobs()
         assert result == {"failed": 2, "new": 0, "max_depth": 0,
-                          "heartbeat_stale": False}
+                          "heartbeat_stale": False, "ask_stale": False, "evolution": "unknown"}
         assert sent == []
 
     def test_only_delta_counts(self, monkeypatch) -> None:
         _, sent = _wire(monkeypatch, JOBS, seen=["a", "b"])
         result = wd.scan_failed_jobs()
         assert result == {"failed": 2, "new": 0, "max_depth": 0,
-                          "heartbeat_stale": False}
+                          "heartbeat_stale": False, "ask_stale": False, "evolution": "unknown"}
         assert sent == []
 
     def test_redis_blip_sends_only_plain_heartbeat_note(
             self, monkeypatch) -> None:
         _, sent = _wire(monkeypatch, JOBS, fail_get=True)
         assert wd.scan_failed_jobs()["new"] == 2
-        assert len(sent) == 1  # heartbeat unreadable -> stale note only
+        assert len(sent) == 2  # worker + ask notes, both plain language
         assert "may be delayed" in sent[0]["text"]
-        assert "Traceback" not in sent[0]["text"]
-        assert "download_attachment" not in sent[0]["text"]
+        assert "slow to answer" in sent[1]["text"]
+        for piece in sent:
+            assert "Traceback" not in piece["text"]
+            assert "download_attachment" not in piece["text"]
+
+    def test_stale_ask_heartbeat_notes_only_ask(
+            self, monkeypatch) -> None:
+        import datetime as dt
+
+        redis, sent = _wire(monkeypatch, [], seen=[])
+        redis.store[wd._ASK_HEARTBEAT_KEY] = (
+            dt.datetime.now(dt.UTC) - dt.timedelta(hours=2)).isoformat()
+        result = wd.scan_failed_jobs()
+        assert result["ask_stale"] is True
+        assert result["heartbeat_stale"] is False
+        assert len(sent) == 1
+        assert "slow to answer" in sent[0]["text"]
 
     def test_state_bounded(self, monkeypatch) -> None:
         redis, _ = _wire(monkeypatch, JOBS)
@@ -172,3 +191,134 @@ class TestWatchdog:
         wd.scan_failed_jobs()
         assert len(sent) == 1
         assert "2 new failed" in sent[0]["text"]
+
+
+class TestEvolutionMonitor:
+    def _evo_wire(self, monkeypatch, jobs, get_handler, base="http://evo:8080",
+                  key="k", **wire_kw):
+        import httpx
+
+        if get_handler is not None:
+            monkeypatch.setattr(
+                wd.httpx, "get",
+                lambda *a, **k: httpx.Client(
+                    transport=httpx.MockTransport(get_handler)).get(*a, **k))
+        redis, sent = _wire(monkeypatch, jobs, **wire_kw)
+        settings = _settings()
+        settings.evolution_base_url = base
+        settings.evolution_api_key = key
+        monkeypatch.setattr(wd, "get_settings", lambda: settings)
+        return redis, sent
+
+    def test_open_instance_is_quiet(self, monkeypatch) -> None:
+        import httpx
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path.endswith(
+                "/instance/connectionState/pia")
+            assert request.headers["apikey"] == "k"
+            return httpx.Response(200, json={"instance": {"state": "open"}})
+
+        _, sent = self._evo_wire(monkeypatch, [], handler, seen=[])
+        result = wd.scan_failed_jobs()
+        assert result["evolution"] == "open"
+        assert sent == []
+
+    def test_closed_instance_pages_student_plainly(
+            self, monkeypatch) -> None:
+        import httpx
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"instance": {"state": "close"}})
+
+        _, sent = self._evo_wire(monkeypatch, [], handler, seen=[])
+        result = wd.scan_failed_jobs()
+        assert result["evolution"] == "close"
+        assert len(sent) == 1
+        assert "paused" in sent[0]["text"]
+        assert "connectionState" not in sent[0]["text"]
+        assert "Traceback" not in sent[0]["text"]
+
+    def test_unreachable_stays_quiet(self, monkeypatch) -> None:
+        def boom(*a, **k):
+            raise ConnectionError("blip")
+
+        _, sent = self._evo_wire(monkeypatch, [], None, seen=[])
+        monkeypatch.setattr(wd.httpx, "get", boom)
+        assert wd.scan_failed_jobs()["evolution"] == "unknown"
+        assert sent == []
+
+    def test_unconfigured_is_unknown(self) -> None:
+        import pia_worker.jobs.watchdog as _wd
+
+        assert _wd.evolution_connection_state()[0] in ("unknown", "open",
+                                                       "close")
+
+
+class TestLlmHealth:
+    def _llm(self, monkeypatch, rows):
+
+        class _FakeResult:
+            def mappings(self):
+                return self
+
+            def all(self):
+                return rows
+
+        class _FakeConn:
+            def execute(self, *a, **k):
+                return _FakeResult()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        class _FakeEngine:
+            def connect(self):
+                return _FakeConn()
+
+        import pia_worker.db as db
+        monkeypatch.setattr(db, "engine_for_current_host",
+                            lambda: _FakeEngine())
+
+    def test_dead_provider_pages_admin_only(self, monkeypatch) -> None:
+        self._llm(monkeypatch, [{"provider": "nvidia_nim",
+                                 "model": "m", "bad": 5, "good": 0}])
+        _, sent = _wire(monkeypatch, [], seen=[])
+        # admin configured: detail section goes to admin chat
+        import pia_worker.jobs.watchdog as _wd
+        monkeypatch.setattr(_wd, "get_settings",
+                            lambda: _settings_with_admin("-999"))
+        wd.scan_failed_jobs()
+        admin_texts = [s["text"] for s in sent if "chat_id" in s]
+        assert len(admin_texts) == 1
+        assert "nvidia_nim" in admin_texts[0]
+        student_texts = [s["text"] for s in sent if "chat_id" not in s]
+        assert student_texts == []
+
+    def test_flaky_provider_stays_in_logs(self, monkeypatch) -> None:
+        self._llm(monkeypatch, [{"provider": "nvidia_nim",
+                                 "model": "m", "bad": 2, "good": 9}])
+        _, sent = _wire(monkeypatch, [], seen=[])
+        wd.scan_failed_jobs()
+        assert sent == []
+
+    def test_db_trouble_is_silent(self, monkeypatch) -> None:
+        import pia_worker.db as db
+        monkeypatch.setattr(
+            db, "engine_for_current_host",
+            lambda: (_ for _ in ()).throw(ConnectionError("down")))
+        _, sent = _wire(monkeypatch, [], seen=[])
+        wd.scan_failed_jobs()
+        assert sent == []
+
+
+def _settings_with_admin(admin: str):
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        watch_queue_depth_threshold=300, watch_heartbeat_stale_seconds=300,
+        admin_telegram_chat_id=admin, debug_notifications_enabled=False,
+        evolution_base_url="", evolution_api_key="",
+        evolution_instance_name="pia")

@@ -34,6 +34,8 @@ _POLL_SECONDS = 25          # long-poll window per getUpdates call
 _MESSAGE_LIMIT = 4096       # Telegram sendMessage hard cap
 _MAX_SOURCES = 3
 _OFFSET_KEY = "pia:tg:offset"
+_HEARTBEAT_KEY = "pia:telegram-ask:heartbeat"
+_HEARTBEAT_INTERVAL_SECONDS = 300  # Redis write at most every 5 minutes
 _HELP_TEXT = (
     "Ask PIA — answers come only from your stored placement data "
     "(cited messages, never invented).\n"
@@ -248,6 +250,25 @@ def _save_offset(offset: int) -> None:
         logger.warning("telegram_offset_save_failed", error=str(exc)[:120])
 
 
+def _beat_heartbeat(last_beat: list[float]) -> None:
+    """Throttled liveness heartbeat so the watchdog can tell a stalled poll
+    loop from a quiet one. Best-effort; failures stay in logs."""
+    import datetime as dt
+
+    now = dt.datetime.now(dt.UTC).timestamp()
+    if last_beat and now - last_beat[0] < _HEARTBEAT_INTERVAL_SECONDS:
+        return
+    try:
+        settings = get_settings()
+        redis_lib.Redis.from_url(
+            settings.redis_url, socket_connect_timeout=2).setex(
+            _HEARTBEAT_KEY, _HEARTBEAT_INTERVAL_SECONDS * 3,
+            dt.datetime.now(dt.UTC).isoformat())
+        last_beat[:] = [now]
+    except Exception as exc:  # noqa: BLE001 — heartbeat must never break polls
+        logger.warning("telegram_heartbeat_failed", error=str(exc)[:120])
+
+
 def run_polling(client: httpx.Client | None = None, answer_fn=ask_question) -> None:
     """Long-poll loop. Injectable httpx client + answer function keep the
     unit tests fully offline (MockTransport + fake ask)."""
@@ -269,11 +290,13 @@ def run_polling(client: httpx.Client | None = None, answer_fn=ask_question) -> N
     _call(http, token, "deleteWebhook")
     state = PollState(offset=_load_offset())
     logger.info("telegram_ask_started", offset=state.offset)
+    last_beat: list[float] = []
 
     while True:
         try:
             body = _call(http, token, "getUpdates",
                          {"offset": state.offset, "timeout": _POLL_SECONDS})
+            _beat_heartbeat(last_beat)
         except Exception as exc:  # noqa: BLE001 — transient network, keep polling
             logger.warning("telegram_poll_failed", error=str(exc)[:120])
             time.sleep(5)
