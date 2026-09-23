@@ -4,8 +4,32 @@ SEC-001: secrets arrive via env only — never hardcode them here.
 SEC-005: ACTION_AUTOMATION_ENABLED=true is refused at construction time in MVP builds.
 """
 
+import os
+from urllib.parse import quote
+
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _database_url_from_postgres(data: dict) -> dict:
+    """Compose DATABASE_URL from POSTGRES_* when unset (host-side dev/tests).
+    Explicit DATABASE_URL always wins; without POSTGRES_USER the localhost
+    default stands. Same rule as the worker settings."""
+    if not isinstance(data, dict):
+        return data
+    if (data.get("DATABASE_URL") or data.get("database_url")
+            or os.environ.get("DATABASE_URL")):
+        return data
+    user = os.environ.get("POSTGRES_USER")
+    if not user:
+        return data
+    password = quote(os.environ.get("POSTGRES_PASSWORD", "pia"))
+    db = os.environ.get("POSTGRES_DB", "pia")
+    # Lowercase field name: init-kwarg population is case-sensitive and the
+    # model ignores unknown (uppercase) extras.
+    return {**data,
+            "database_url": f"postgresql+psycopg://{quote(user)}:{password}"
+                            f"@localhost:5432/{db}"}
 
 
 class Settings(BaseSettings):
@@ -55,6 +79,11 @@ class Settings(BaseSettings):
     # submit job only when this is on (FORM_SUBMIT_DRY_RUN still applies).
     form_automation_enabled: bool = False
     stage3_executors_enabled: bool = False  # ADR-013 per-capability switch
+
+    @model_validator(mode="before")
+    @classmethod
+    def _compose_database_url(cls, data):
+        return _database_url_from_postgres(data)
 
     @model_validator(mode="after")
     def enforce_action_kill_switch(self) -> "Settings":

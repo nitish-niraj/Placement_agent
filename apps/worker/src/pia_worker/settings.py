@@ -1,9 +1,35 @@
 """Worker settings (F-003: queue abstraction, retries, dead-letter queue)."""
 
+import os
 from functools import lru_cache
+from urllib.parse import quote
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _database_url_from_postgres(data: dict) -> dict:
+    """Compose DATABASE_URL from POSTGRES_* when it is not set explicitly.
+
+    Host context (tests, listener CLIs, host-run workers) has POSTGRES_* but
+    no DATABASE_URL; in compose the explicit DATABASE_URL always wins and
+    this is a no-op. Mirrors pia_worker.db.host_database_url so both doors
+    agree."""
+    if not isinstance(data, dict):
+        return data
+    if (data.get("DATABASE_URL") or data.get("database_url")
+            or os.environ.get("DATABASE_URL")):
+        return data
+    user = os.environ.get("POSTGRES_USER")
+    if not user:
+        return data
+    password = quote(os.environ.get("POSTGRES_PASSWORD", "pia"))
+    db = os.environ.get("POSTGRES_DB", "pia")
+    # Lowercase field name: init-kwarg population is case-sensitive and the
+    # model ignores unknown (uppercase) extras.
+    return {**data,
+            "database_url": f"postgresql+psycopg://{quote(user)}:{password}"
+                            f"@localhost:5432/{db}"}
 
 
 class Settings(BaseSettings):
@@ -119,6 +145,11 @@ class Settings(BaseSettings):
     # Ops channel for worker internals (DLQ summaries). Empty = same channel
     # as the student, but redacted to one plain-language line (never traces).
     admin_telegram_chat_id: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _compose_database_url(cls, data):
+        return _database_url_from_postgres(data)
 
     @model_validator(mode="after")
     def enforce_action_kill_switch(self) -> "Settings":

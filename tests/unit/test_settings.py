@@ -35,3 +35,42 @@ def test_worker_settings_defaults() -> None:
     settings = WorkerSettings(_env_file=None)  # type: ignore[call-arg]
     assert settings.redis_url == "redis://localhost:6379/0"
     assert settings.default_job_retries == 5
+
+
+class TestDatabaseUrlComposition:
+    """Host context (tests, CLIs) has POSTGRES_* but no DATABASE_URL —
+    settings must compose it so _engine() reaches the real DB."""
+
+    @staticmethod
+    def _clean(monkeypatch: pytest.MonkeyPatch) -> None:
+        for var in ("DATABASE_URL", "POSTGRES_USER", "POSTGRES_PASSWORD",
+                    "POSTGRES_DB"):
+            monkeypatch.delenv(var, raising=False)
+
+    def test_explicit_url_always_wins(
+            self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clean(monkeypatch)
+        monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://a:b@db:5432/x")
+        monkeypatch.setenv("POSTGRES_USER", "pia")
+        monkeypatch.setenv("POSTGRES_PASSWORD", "other")
+        for cls in (Settings, WorkerSettings):
+            got = cls(_env_file=None).database_url  # type: ignore[call-arg]
+            assert got == "postgresql+psycopg://a:b@db:5432/x"
+
+    def test_composed_from_postgres_vars(
+            self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clean(monkeypatch)
+        monkeypatch.setenv("POSTGRES_USER", "pia")
+        monkeypatch.setenv("POSTGRES_PASSWORD", "s3cret!")
+        monkeypatch.setenv("POSTGRES_DB", "pia")
+        for cls in (Settings, WorkerSettings):
+            url = cls(_env_file=None).database_url  # type: ignore[call-arg]
+            assert url == ("postgresql+psycopg://pia:s3cret%21"
+                           "@localhost:5432/pia")
+
+    def test_default_stands_without_postgres_vars(
+            self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clean(monkeypatch)
+        for cls in (Settings, WorkerSettings):
+            got = cls(_env_file=None).database_url  # type: ignore[call-arg]
+            assert got == "postgresql+psycopg://pia:pia@localhost:5432/pia"
