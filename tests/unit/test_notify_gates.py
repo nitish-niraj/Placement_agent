@@ -194,3 +194,93 @@ class TestNotifyGates:
             app_row=None)
         assert nt.notify_event("event-uuid") == "suppressed_state"
         _ = conn
+
+
+def _pending_script(event: dict):
+    """Bundle attachments settled-but-unmatched: list parsed, match not yet
+    run (the PRAPER/VENLNEXAA race) — or nothing parsed yet."""
+
+    def script(sql: str, params: dict | None = None) -> FakeResult:
+        if "FROM events e" in sql:
+            return FakeResult(mapping=event)
+        if "FROM attachments" in sql:
+            return FakeResult(mapping_list=[
+                {"id": "att-uuid", "file_name": "list.xlsx",
+                 "state": "PROCESSED"}])
+        if "FROM document_extractions" in sql:
+            return FakeResult(mapping_list=_list_payload())
+        if "FROM eligibility_records" in sql:
+            return FakeResult(mapping=None)  # match not yet run
+        if "SELECT id FROM users" in sql:
+            return FakeResult(mapping=SimpleNamespace(id="user-uuid"))
+        if "FROM application_states" in sql:
+            return FakeResult(mapping=None)
+        if "INSERT INTO application_states" in sql:
+            return FakeResult(mapping=_app_row("UNKNOWN"))
+        if "INSERT INTO notifications" in sql:
+            return FakeResult(mapping=SimpleNamespace(id="notif-uuid"))
+        return FakeResult()
+    return script
+
+
+class TestNotifyDeferral:
+    """Race guard: LIST_GATED notify while the bundle match is still pending
+    must defer (requeue), not VERIFY — PRAPER/VENLNEXAA lesson."""
+
+    def _run_pending(self, monkeypatch: pytest.MonkeyPatch,
+                     defer_count: int) -> tuple[FakeConn, list]:
+        event = _event("REGISTRATION",
+                       "You are eligible for the drive *VENLNEXAA OC.43806*. "
+                       "Register on the placement portal.")
+        conn = FakeConn(_pending_script(event))
+        monkeypatch.setattr(nt, "_engine", lambda: FakeEngine(conn))
+        monkeypatch.setattr(nt, "_enqueue_send", lambda nid: "queued")
+        monkeypatch.setattr(nt, "_defer_count", lambda eid: defer_count)
+        requeued: list = []
+        monkeypatch.setattr(
+            nt, "_requeue_notify_delayed",
+            lambda eid, outcome, minutes: requeued.append(
+                (eid, outcome, minutes)))
+        return conn, requeued
+
+    def test_pending_match_defers_not_verifies(
+            self, monkeypatch: pytest.MonkeyPatch) -> None:
+        conn, requeued = self._run_pending(monkeypatch, defer_count=0)
+        assert nt.notify_event("event-uuid") == "deferred"
+        assert requeued == [("event-uuid", "created", nt.NOTIFY_DEFER_MINUTES)]
+        assert not any("INSERT INTO notifications" in sql
+                       for sql, _ in conn.executed)
+
+    def test_exhausted_budget_falls_through_to_gate(
+            self, monkeypatch: pytest.MonkeyPatch) -> None:
+        conn, requeued = self._run_pending(
+            monkeypatch, defer_count=nt.NOTIFY_DEFER_MAX_ATTEMPTS)
+        # List parsed but no eligible record and no USER_ABSENT yet (match
+        # never ran): gate sees not_found -> suppressed_list, still no VERIFY.
+        assert nt.notify_event("event-uuid") == "suppressed_list"
+        assert requeued == []
+        _ = conn
+
+    def test_failed_download_never_defers(
+            self, monkeypatch: pytest.MonkeyPatch) -> None:
+        event = _event("REGISTRATION", "Register on the placement portal.")
+        base = _pending_script(event)
+
+        def script(sql: str, params: dict | None = None) -> FakeResult:
+            if "FROM attachments" in sql:
+                return FakeResult(mapping_list=[
+                    {"id": "att-uuid", "file_name": "list.xlsx",
+                     "state": "FAILED"}])
+            if "FROM document_extractions" in sql:
+                return FakeResult(mapping_list=[])  # never parsed
+            return base(sql, params)
+
+        conn = FakeConn(script)
+        monkeypatch.setattr(nt, "_engine", lambda: FakeEngine(conn))
+        monkeypatch.setattr(nt, "_enqueue_send", lambda nid: "queued")
+        monkeypatch.setattr(
+            nt, "_defer_count",
+            lambda eid: (_ for _ in ()).throw(
+                AssertionError("must not consult budget on failed download")))
+        assert nt.notify_event("event-uuid") != "deferred"
+        _ = conn

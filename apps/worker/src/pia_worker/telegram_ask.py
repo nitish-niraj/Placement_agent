@@ -117,6 +117,8 @@ def _handle_callback(client: httpx.Client, token: str, owner_chat_id: str,
     query_id = str(callback.get("id") or "")
     message = callback.get("message") or {}
     chat_id = str((message.get("chat") or {}).get("id", ""))
+    logger.info("telegram_callback_received", query_id=query_id,
+                chat_id=chat_id, has_data=bool(callback.get("data")))
     if chat_id != str(owner_chat_id):
         logger.warning("telegram_callback_foreign_chat_ignored", chat_id=chat_id)
         return
@@ -222,9 +224,18 @@ def _handle_update(client: httpx.Client, token: str, owner_chat_id: str,
 
 def _process_updates(client: httpx.Client, token: str, owner_chat_id: str,
                      updates: list[dict], state: PollState, answer_fn) -> None:
+    """Ack-safe batch processing: the offset advances only AFTER an update is
+    handled, and one bad update never blocks the rest (previously the offset
+    moved first, so a crash between ack and handle silently dropped clicks —
+    the dead Applied/Not-Applied buttons)."""
     for update in updates:
-        state.offset = max(state.offset, int(update.get("update_id", 0)) + 1)
-        _handle_update(client, token, owner_chat_id, update, answer_fn)
+        update_id = int(update.get("update_id", 0))
+        try:
+            _handle_update(client, token, owner_chat_id, update, answer_fn)
+        except Exception as exc:  # noqa: BLE001 — next update still processed
+            logger.error("telegram_update_failed", update_id=update_id,
+                         error=str(exc)[:180])
+        state.offset = max(state.offset, update_id + 1)
 
 
 def _load_offset() -> int:

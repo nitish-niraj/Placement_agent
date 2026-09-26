@@ -18,7 +18,7 @@ then PENDING_DELIVERY (TRD §8 backup path).
 
 import contextlib
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import sqlalchemy
@@ -66,6 +66,52 @@ from pia_worker.settings import get_settings
 logger = structlog.get_logger()
 
 DIGEST_QUEUED = "queued_for_digest"
+
+# Notify race guard (PRAPER/VENLNEXAA lesson): text-only event extraction is
+# fast, but download -> parse -> match takes minutes. A LIST_GATED notify
+# decided while the bundle's attachments are still unsettled can only say
+# VERIFY — wrongly for both NOT_FOUND (noise) and ELIGIBLE (under-informative)
+# cases. So NOT_AVAILABLE (pending, not failed) defers the decision instead:
+# requeue after NOTIFY_DEFER_MINUTES, up to NOTIFY_DEFER_MAX_ATTEMPTS
+# (~9 min total). Exhausted budget or FAILED downloads fall through to the
+# VERIFY telegram (never silent). USER_ABSENT still suppresses via the gate.
+NOTIFY_DEFER_MINUTES = 3
+NOTIFY_DEFER_MAX_ATTEMPTS = 3
+NOTIFY_DEFER_KEY_PREFIX = "pia:notify:defer:"
+
+
+def _defer_count(event_id: str) -> int:
+    """How many times this event's notify was already deferred (0 on any
+    Redis failure — fail-open is handled by the caller)."""
+    try:
+        value = _redis().get(NOTIFY_DEFER_KEY_PREFIX + event_id)
+        return int(value) if value else 0
+    except Exception:  # noqa: BLE001 — Redis down means fail-open below
+        return 0
+
+
+def _record_defer(event_id: str) -> int:
+    """Bump the defer counter; returns the new count, or a value above the
+    max when Redis is unavailable (caller then proceeds instead of looping)."""
+    try:
+        client = _redis()
+        count = int(client.incr(NOTIFY_DEFER_KEY_PREFIX + event_id))
+        client.expire(NOTIFY_DEFER_KEY_PREFIX + event_id, 1800)
+        return count
+    except Exception:  # noqa: BLE001 — fail-open: proceed to normal flow
+        return NOTIFY_DEFER_MAX_ATTEMPTS + 1
+
+
+def _requeue_notify_delayed(event_id: str, outcome: str, minutes: int) -> None:
+    """Re-run notify_event after a delay (same outcome — no state is stored
+    on defer, so the retry decides from fresh bundle state)."""
+    from rq import Queue
+
+    from pia_worker.queue import REALTIME_QUEUE
+
+    Queue(REALTIME_QUEUE, connection=_redis()).enqueue_in(
+        timedelta(minutes=minutes),
+        "pia_worker.jobs.notify.notify_event", event_id, outcome)
 
 
 def _channel() -> TelegramChannel:
@@ -336,6 +382,31 @@ def notify_event(event_id: str, outcome: str = "created") -> str:
         payload.get("salary_package"),
     )
     key = dedup_key(str(event["id"]), state_hash)
+
+    # Race guard: bundle attachments still unsettled (downloaded but not yet
+    # parsed/matched) -> defer, don't VERIFY yet. FAILED downloads and
+    # exhausted budgets fall through to the normal flow below.
+    if EventType(event["type"]) in LIST_GATED_TYPES:
+        from pia_worker.notify.context import AttachmentVerification
+
+        with engine.connect() as conn:
+            pre_verification, pre_detail = app_records.resolve_verification(
+                conn, payload.get("source_message_id"),
+                event["company_id"] and str(event["company_id"]))
+        if (pre_verification == AttachmentVerification.NOT_AVAILABLE.value
+                and "failed" not in (pre_detail or "").lower()
+                and _defer_count(str(event["id"])) < NOTIFY_DEFER_MAX_ATTEMPTS):
+            try:
+                _record_defer(str(event["id"]))
+                _requeue_notify_delayed(str(event["id"]), outcome,
+                                        NOTIFY_DEFER_MINUTES)
+            except Exception:  # noqa: BLE001 — fail-open to normal flow
+                pass
+            else:
+                logger.info("notification_deferred_pending_attachments",
+                            event_id=str(event["id"]),
+                            verification=pre_verification, detail=pre_detail)
+                return "deferred"
 
     # Application-aware gate (company mentioned != applied) + strict
     # CSV/image list gate. Openings and informational shapes return
@@ -751,7 +822,7 @@ def daily_digest() -> str:
     today = datetime.now(tz=ZoneInfo(settings.app_timezone)).date().isoformat()
     anchor = f"digest:{today}"
     with engine.begin() as conn:
-        claimed = conn.execute(
+        claimed: object = conn.execute(
             sqlalchemy.text(
                 "INSERT INTO idempotency_keys (key, fingerprint, entity_ref) "
                 "VALUES (:key, :fp, :ref) ON CONFLICT (key) DO NOTHING "

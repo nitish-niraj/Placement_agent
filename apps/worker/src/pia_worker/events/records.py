@@ -157,16 +157,16 @@ def upsert_deadline(conn: sqlalchemy.Connection, event_id: str,
                 ),
                 {"eid": event_id, "due": due_at},
             )
-            moved_id = conn.execute(
+            moved_id: str = str(conn.execute(
                 sqlalchemy.text(
                     "SELECT id FROM deadlines WHERE event_id = CAST(:eid AS uuid)"
                 ),
                 {"eid": event_id},
-            ).scalar_one()
-            _audit(conn, "deadline.moved", str(moved_id),
+            ).scalar_one())
+            _audit(conn, "deadline.moved", moved_id,
                    {"from": existing["due_at"].isoformat(),
                     "to": due_at.isoformat(), "old_state": old_state})
-            return str(moved_id)
+            return moved_id
     row = conn.execute(
         sqlalchemy.text(
             "INSERT INTO deadlines (event_id, due_at, state) "

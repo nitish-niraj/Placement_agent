@@ -141,6 +141,25 @@ class TestOffset:
                             state, _answer_fn())
         assert state.offset == 7
 
+    def test_failing_update_does_not_block_rest(self, monkeypatch) -> None:
+        """One crashing update must not drop the clicks behind it (dead
+        Applied/Not-Applied buttons) — offset advances per update."""
+        seen: list[int] = []
+
+        def flaky(client, token, owner, update, answer_fn) -> None:
+            seen.append(update["update_id"])
+            if update["update_id"] == 6:
+                raise RuntimeError("boom")
+
+        monkeypatch.setattr(ta, "_handle_update", flaky)
+        state = ta.PollState(offset=0)
+        ta._process_updates(_recording_client([]), "tok", OWNER,
+                            [_update(5, OWNER, "one"), _update(6, OWNER, "two"),
+                             _update(7, OWNER, "three")],
+                            state, _answer_fn())
+        assert seen == [5, 6, 7]
+        assert state.offset == 8
+
 
 class TestGating:
     def test_disabled_flag_returns_immediately(self, monkeypatch) -> None:
