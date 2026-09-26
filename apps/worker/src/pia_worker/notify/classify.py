@@ -141,10 +141,12 @@ APPLICATION_GATED_TYPES = frozenset({
 })
 
 # Event types suppressed by the strict list gate: a candidate-list attachment
-# (CSV/XLSX/PDF/image) that does NOT contain the student kills these —
-# Mars.AI-style account-creation spam for non-listed students ends here.
+# (CSV/XLSX/PDF/image, including split-message bundles) that does NOT contain
+# the student kills these — Mars.AI-style spam AND false SHORTLIST hallucinations
+# (text says "shortlisted" but the attached list lacks the student) end here.
 LIST_GATED_TYPES = frozenset({
-    EventType.FORM, EventType.KYC, EventType.REGISTRATION})
+    EventType.FORM, EventType.KYC, EventType.REGISTRATION,
+    EventType.SHORTLIST, EventType.RESULT, EventType.OA, EventType.INTERVIEW})
 
 
 def is_post_application_shaped(analysis: MessageAnalysis) -> bool:

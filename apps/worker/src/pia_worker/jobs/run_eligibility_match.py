@@ -91,6 +91,29 @@ def run_eligibility_match(extraction_id: str) -> str:
 
     company_name = collapse_ws(detection.get("company") or "")
     if not company_name:
+        # Bundle fallback: image-only lists carry no company header and the
+        # file is image.jpg — resolve from neighbouring announcement text
+        # (same group ± window), e.g. "OFFSHORE MARKETERS OC.31125...".
+        # Without this every split-message list ends as skipped_no_company
+        # and the SHORTLIST gate can never suppress the hallucination.
+        try:
+            from pia_worker.bundles import bundle_text, resolve_bundle_message_ids
+            from pia_worker.events.rules import extract_company_from_text
+
+            with engine.connect() as bundle_conn:
+                bundle_ids = resolve_bundle_message_ids(
+                    bundle_conn, str(extraction["message_id"]))
+                combined = bundle_text(bundle_conn, bundle_ids)
+            if combined:
+                company_name = collapse_ws(
+                    extract_company_from_text(combined) or "")
+                if company_name:
+                    logger.info("eligibility_company_from_bundle",
+                                extraction_id=extraction_id,
+                                company=company_name)
+        except Exception:  # noqa: BLE001 — fallback never breaks matching
+            pass
+    if not company_name:
         # eligibility_records.company_id is NOT NULL — without any company
         # signal there is nothing to attach the decision to; the extraction
         # keeps the evidence and the gap is visible in logs.

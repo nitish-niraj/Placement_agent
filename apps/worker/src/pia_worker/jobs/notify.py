@@ -131,13 +131,32 @@ def _application_gate(
       mismatch): post-application follow-up suppressed.
     """
     nodecision: FollowUpDecision | None = None
+    message_id = payload.get("source_message_id")
+    if event_type in LIST_GATED_TYPES:
+        # Company-agnostic: a bundle list without the student suppresses even
+        # when company_id is None (e.g. "Kindly book your slot" + image list
+        # with no drive code — the General-INTERVIEW hallucination).
+        # message_list_gate(None company) checks any ELIGIBLE record in the
+        # bundle; resolve_verification(None) still reports USER_ABSENT when
+        # the bundle list was compared with no match.
+        gate_company = str(company_id) if company_id else None
+        # Bundle-aware: text + neighbouring image/excel is one entity.
+        if (app_records.message_list_gate(
+                conn, message_id, gate_company) == "not_found"):
+            return "suppressed_list", nodecision, None
+        # Company-agnostic second net: bundle list exists but identity match
+        # says USER_ABSENT (e.g. company unresolved on the extraction side).
+        # NOT_AVAILABLE / PARSE_FAILED fall through to VERIFY telegram —
+        # never suppressed silently, never treated as absent.
+        try:
+            verification, _ = app_records.resolve_verification(
+                conn, message_id, gate_company)
+        except Exception:  # noqa: BLE001 — verification never blocks gating
+            verification = "NOT_RELEVANT"
+        if verification == "USER_ABSENT":
+            return "suppressed_list", nodecision, None
     if event_type not in APPLICATION_GATED_TYPES or not company_id:
         return "proceed", nodecision, None
-    message_id = payload.get("source_message_id")
-    if (event_type in LIST_GATED_TYPES
-            and app_records.message_list_gate(
-                conn, message_id, str(company_id)) == "not_found"):
-        return "suppressed_list", nodecision, None
     text = (payload.get("excerpt") or "")
     analysis = analyze_application_message(text)
     if not is_post_application_shaped(analysis):
@@ -186,6 +205,23 @@ def _build_resolved_context(engine, event: dict, payload: dict,  # noqa: ANN001
     with engine.connect() as conn:
         verification, detail = app_records.resolve_verification(
             conn, message_id, company_id)
+        # Bundle attachments for evidence (split image/text pairs share files).
+        try:
+            from pia_worker.bundles import resolve_bundle_message_ids
+
+            bundle_ids = resolve_bundle_message_ids(conn, message_id)
+            file_rows = conn.execute(
+                sqlalchemy.text(
+                    "SELECT file_name FROM attachments "
+                    "WHERE message_id = ANY(:msgs) ORDER BY created_at"
+                ),
+                {"msgs": bundle_ids},
+            ).mappings().all()
+            attachment_names = tuple(
+                str(r.get("file_name") or "") for r in file_rows
+                if r.get("file_name"))
+        except Exception:  # noqa: BLE001 — evidence never blocks notify
+            attachment_names = ()
     excerpt = payload.get("excerpt") or ""
     topic = classify_topic(excerpt)
     subject = (payload.get("subject_display") or event["company"]
@@ -205,7 +241,7 @@ def _build_resolved_context(engine, event: dict, payload: dict,  # noqa: ANN001
         deadline=event["deadline_at"], location=location,
         source_message=excerpt,
         source_message_id=message_id, source_group=event["group_name"],
-        attachments=(),
+        attachments=attachment_names,
         verification=AttachmentVerification(verification),
         attachment_detail=detail,
         confidence=1.0 if event["company_id"] else 0.5,
@@ -546,8 +582,11 @@ def _escalation_gated(conn: sqlalchemy.Connection, row) -> bool:  # noqa: ANN001
     """True when this deadline reminder must not fire.
 
     Mirrors the notify-time gate with the text available on the row
-    (excerpt, else title): the strict list gate kills FORM/KYC/REGISTRATION
-    reminders for non-listed students; post-application-shaped reminders
+    (excerpt, else title): the strict list gate kills SHORTLIST/RESULT/OA/
+    INTERVIEW/FORM/KYC/REGISTRATION reminders for non-listed students
+    (bundle-aware); unverifiable bundles (NOT_AVAILABLE/PARSE_FAILED) also
+    suppress escalations — the main VERIFY telegram already covers those,
+    and false urgency must not fire. Post-application-shaped reminders
     need APPLIED on the matched company+role. FORM/KYC/DOCUMENT_SUBMISSION
     are application-shaped by nature, so with no text they still require
     APPLIED; REGISTRATION/OA-type deadlines without post-application
@@ -555,15 +594,32 @@ def _escalation_gated(conn: sqlalchemy.Connection, row) -> bool:  # noqa: ANN001
     """
     event_type = EventType(row["type"])
     company_id = row["company_id"] and str(row["company_id"])
+    payload = row["current_payload"] or {}
+    if event_type in LIST_GATED_TYPES:
+        gate_company = str(company_id) if company_id else None
+        if (app_records.message_list_gate(
+                conn, payload.get("source_message_id"), gate_company) == "not_found"):
+            logger.info("escalation_suppressed_not_in_list",
+                        event_id=str(row["event_id"]))
+            return True
+        try:
+            verification, _ = app_records.resolve_verification(
+                conn, payload.get("source_message_id"), gate_company)
+        except Exception:  # noqa: BLE001 — verification never blocks gating
+            verification = "NOT_RELEVANT"
+        if verification == "USER_ABSENT":
+            logger.info("escalation_suppressed_not_in_list",
+                        event_id=str(row["event_id"]))
+            return True
+        if verification in ("NOT_AVAILABLE", "PARSE_FAILED"):
+            # Bundle has attachments but proves nothing — main VERIFY covers
+            # it; escalation urgency would be a hallucination.
+            logger.info("escalation_suppressed_unverifiable",
+                        event_id=str(row["event_id"]),
+                        verification=verification)
+            return True
     if company_id is None or event_type not in APPLICATION_GATED_TYPES:
         return False
-    payload = row["current_payload"] or {}
-    if (event_type in LIST_GATED_TYPES
-            and app_records.message_list_gate(
-                conn, payload.get("source_message_id"), company_id) == "not_found"):
-        logger.info("escalation_suppressed_not_in_list",
-                    event_id=str(row["event_id"]))
-        return True
     text = (payload.get("excerpt") or "").strip()
     if text:
         shaped = is_post_application_shaped(analyze_application_message(text))

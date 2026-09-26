@@ -218,11 +218,44 @@ def _parse_image(data: bytes, provider: NIMProvider | None,
             notes=[result.notes] if result.notes else [],
         )
         if not result.rows:
-            parsed.needs_review = True
-            parsed.notes.append("vision found no candidate rows")
+            # Vision saw no rows — try deterministic OCR-text parsing before
+            # giving up, so screenshot tables still yield matchable rows
+            # (reg-only fallback) instead of INVALID_SOURCE.
+            try:
+                ocr = images.rapid_ocr(data)
+                ocr_rows = images.ocr_text_to_rows(ocr.text or "")
+                if ocr_rows:
+                    parsed.rows = ocr_rows
+                    parsed.text = ocr.text
+                    parsed.is_candidate_list = True
+                    parsed.confidence = ocr.confidence or 0.6
+                    parsed.notes.append(
+                        f"vision empty — ocr parsed {len(ocr_rows)} row(s)")
+                else:
+                    parsed.needs_review = True
+                    parsed.notes.append("vision found no candidate rows")
+                    if ocr.text:
+                        parsed.text = ocr.text
+            except Exception:  # noqa: BLE001 — OCR fallback never breaks vision path
+                parsed.needs_review = True
+                parsed.notes.append("vision found no candidate rows")
         return parsed
     # Vision unavailable → RapidOCR fallback (user decision: P5 OCR strategy)
+    # + deterministic line parsing so the list is still matchable.
     fallback = images.rapid_ocr(data)
-    fallback.is_candidate_list = (
-        eligible_list_signal(fallback.text) if fallback.text else None)
+    try:
+        ocr_rows = images.ocr_text_to_rows(fallback.text or "")
+    except Exception:  # noqa: BLE001 — parsing never breaks OCR fallback
+        ocr_rows = []
+    if ocr_rows:
+        fallback.rows = ocr_rows
+        # A table with many parsed rows IS a candidate list even without
+        # keywords (same row_signal rule as _detect).
+        fallback.is_candidate_list = True
+        if not fallback.confidence:
+            fallback.confidence = 0.6
+        fallback.notes.append(f"ocr parsed {len(ocr_rows)} row(s) without vision")
+    else:
+        fallback.is_candidate_list = (
+            eligible_list_signal(fallback.text) if fallback.text else None)
     return fallback

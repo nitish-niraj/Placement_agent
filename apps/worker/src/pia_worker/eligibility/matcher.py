@@ -126,6 +126,15 @@ def _row_identifiers(row: CandidateRow) -> dict[str, str]:
         digits = digits_only(getattr(row, field_name))
         if digits:
             values[field_name] = digits
+    # OCR/table fallback: a reg/roll printed under an unmapped header lands in
+    # other_identifiers — still a comparable identifier when it is digits-only
+    # and long enough (prevents missed reg-only matches on messy screenshots).
+    for key, value in (row.other_identifiers or {}).items():
+        if not value:
+            continue
+        digits = digits_only(value)
+        if len(digits) >= MIN_IDENTIFIER_DIGITS and digits not in values.values():
+            values[f"other:{key}"] = digits
     return values
 
 
@@ -183,15 +192,19 @@ def evaluate_row(
 
     # --- Stage 3 IDENTIFIER (preferred signal — dominates name stages when the
     # row carries a comparable id; see module docstring for why it runs first).
-    comparable = [
-        (field_name, row_ids[field_name], profile_ids[field_name])
-        for field_name in row_ids
-        if field_name in profile_ids
-        and len(row_ids[field_name]) >= MIN_IDENTIFIER_DIGITS
-        and len(profile_ids[field_name]) >= MIN_IDENTIFIER_DIGITS
-    ]
-    if comparable:
-        if any(row_digits == profile_digits for _, row_digits, profile_digits in comparable):
+    # Cross-field compare: portal may store the number as roll_number while the
+    # list prints it as registration_number (or under an unmapped header).
+    # Any equal digits-only value >= MIN_IDENTIFIER_DIGITS is a hit; any
+    # comparable pair with no equality is a hard mismatch (identifier
+    # dominance). Empty/missing names still match via reg-only fallback
+    # (uncorroborated 0.85 + review) — never silently dropped.
+    row_vals = [v for v in row_ids.values() if len(v) >= MIN_IDENTIFIER_DIGITS]
+    profile_vals = [v for v in profile_ids.values() if len(v) >= MIN_IDENTIFIER_DIGITS]
+    comparable_exists = bool(row_vals and profile_vals)
+    matched_digits = sorted(set(row_vals) & set(profile_vals))
+    if comparable_exists:
+        if matched_digits:
+            matched = matched_digits[0]
             corroborated = name_norm in profile.normalized_names or (
                 best_name_similarity(name_norm, profile) >= thresholds.ambiguous
             )
@@ -204,7 +217,7 @@ def evaluate_row(
                     evidence=evidence,
                     matched_identity_id=profile.profile_id,
                     matched_row_index=row.row_index,
-                    rationale=f"identifier {comparable[0][1]} matches profile; "
+                    rationale=f"identifier {matched} matches profile; "
                               "name corroborates",
                 )
             return MatchResult(
@@ -215,7 +228,7 @@ def evaluate_row(
                 requires_user_review=True,
                 matched_identity_id=profile.profile_id,
                 matched_row_index=row.row_index,
-                rationale="identifier matches but name does not corroborate"
+                rationale=f"identifier {matched} matches but name does not corroborate"
                           + (f"; {'; '.join(conflicts)}" if conflicts else ""),
             )
         # Hard identifier mismatch: the row belongs to a different student.

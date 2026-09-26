@@ -54,12 +54,26 @@ def extract_events(message_id: str) -> str:
         return "already"
 
     text = message["text"] or ""
-    event_type = rules.resolve_event_type(text)
+    # Bundle-aware: image-first-then-text / text-first-then-image pairs are one
+    # entity. Event type, company, and dates resolve on the combined bundle
+    # text so an image-only row still yields the announcement event (with its
+    # neighbouring list attached) and a text-only row still sees the list.
+    try:
+        from pia_worker.bundles import bundle_text, resolve_bundle_message_ids
+
+        with engine.connect() as bundle_conn:
+            bundle_ids = resolve_bundle_message_ids(bundle_conn, message_id)
+            combined = bundle_text(bundle_conn, bundle_ids)
+        bundle_text_value = combined or text
+    except Exception:  # noqa: BLE001 — bundling never breaks extraction
+        bundle_ids = [message_id]
+        bundle_text_value = text
+    event_type = rules.resolve_event_type(bundle_text_value)
     if event_type is None:
         return "no_event"
 
     # --- company: prefer the resolved ids from P7 mention linkage, fall back
-    # to the deterministic drive-code signal in the text itself.
+    # to the deterministic drive-code signal in the bundle text itself.
     classification = message["classification"] or {}
     resolved = classification.get("companies_resolved") or []
     company_id = str(resolved[0]["id"]) if resolved else None
@@ -69,7 +83,7 @@ def extract_events(message_id: str) -> str:
         company_name = str(resolved[0]["canonical"])
         company_key = normalize_name(company_name)
     else:
-        text_company = rules.extract_company_from_text(text)
+        text_company = rules.extract_company_from_text(bundle_text_value)
         if text_company:
             with engine.begin() as conn:
                 # Drive codes are authoritative: mint the row when needed.
@@ -79,21 +93,21 @@ def extract_events(message_id: str) -> str:
                 company_key = ref.normalized_key
 
     # --- subject: what is this actually about? Resolved company first, then
-    # the attachment filename, then an ALL-CAPS topic token (MARS), then an
-    # honest fallback — never the blind string "General".
+    # the bundle attachment filename, then an ALL-CAPS topic token (MARS),
+    # then an honest fallback — never the blind string "General".
     with engine.begin() as conn:
         file_row = conn.execute(
             sqlalchemy.text(
                 "SELECT file_name FROM attachments "
-                "WHERE message_id = CAST(:id AS uuid) "
+                "WHERE message_id = ANY(:mids) "
                 "ORDER BY created_at LIMIT 1"
             ),
-            {"id": message_id},
+            {"mids": bundle_ids},
         ).first()
         from pia_worker.companies.subject import identify_subject
 
         subject = identify_subject(
-            conn, text=text, company_id=company_id,
+            conn, text=bundle_text_value, company_id=company_id,
             canonical=company_name,
             file_name=str(file_row.file_name)
             if file_row is not None and file_row.file_name else None,
@@ -105,17 +119,17 @@ def extract_events(message_id: str) -> str:
     # --- dates (FR-EVT-002/005): deadline context wins; occurrence dates land
     # in start_at. No parseable date -> both stay None. Never invented.
     received_at = message["received_at"]
-    hits = parse_date_mentions(text, received_at)
+    hits = parse_date_mentions(bundle_text_value, received_at)
     deadline_at = None
     start_at = None
     date_phrase = None
     if hits:
-        if rules.detect_deadline_context(text):
+        if rules.detect_deadline_context(bundle_text_value):
             deadline_at = deadline_from_hit(hits[0])
             date_phrase = hits[0].phrase
-            if len(hits) > 1 and rules.detect_occurrence_context(text):
+            if len(hits) > 1 and rules.detect_occurrence_context(bundle_text_value):
                 start_at = hits[1].resolved
-        elif rules.detect_occurrence_context(text):
+        elif rules.detect_occurrence_context(bundle_text_value):
             start_at = hits[0].resolved
             date_phrase = hits[0].phrase
 
@@ -127,7 +141,7 @@ def extract_events(message_id: str) -> str:
     # normalize before planning so re-announcements merge into one event.
     action = normalize_action(raw_action)
 
-    drive_fields = rules.extract_drive_fields(text)
+    drive_fields = rules.extract_drive_fields(bundle_text_value)
 
     plan = EventPlan(
         event_type=event_type,
@@ -138,10 +152,10 @@ def extract_events(message_id: str) -> str:
         action=action,
         deadline_at=deadline_at,
         start_at=start_at,
-        links=rules.extract_links(text),
-        venue=rules.extract_venue(text),
+        links=rules.extract_links(bundle_text_value),
+        venue=rules.extract_venue(bundle_text_value),
         date_phrase=date_phrase,
-        excerpt=text,
+        excerpt=bundle_text_value,
         source_message_id=message_id,
         designation=drive_fields.get("designation"),
         salary_package=drive_fields.get("salary_package"),
@@ -162,7 +176,7 @@ def extract_events(message_id: str) -> str:
                 "VALUES (:key, :fp, :ref) ON CONFLICT (key) DO NOTHING"
             ),
             {"key": f"events:{message_id}",
-             "fp": hashlib.sha256(text.encode()).hexdigest(),
+             "fp": hashlib.sha256(bundle_text_value.encode()).hexdigest(),
              "ref": event_id},
         )
 

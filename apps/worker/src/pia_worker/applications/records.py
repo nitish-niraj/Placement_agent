@@ -196,23 +196,32 @@ def message_list_gate(
     conn: sqlalchemy.Connection, message_id: str | None,
     company_id: str | None,
 ) -> str:
-    """Strict CSV/image gate for one message: 'eligible' | 'not_found' | 'no_list'.
+    """Strict list gate for one message BUNDLE: 'eligible' | 'not_found' | 'no_list'.
 
-    'not_found' = the message carries a candidate-list attachment (CSV, XLSX,
+    Bundle = same-group messages within ±bundle_window_minutes of the anchor
+    (image-first-then-text and text-first-then-image both merge). Attachments
+    and eligibility records are matched on ANY bundle id, so a text-only
+    announcement whose list arrived as the neighbouring message still gates.
+
+    'not_found' = the bundle carries a candidate-list attachment (CSV, XLSX,
     PDF, or OCR'd image) and no ELIGIBLE/USER_CONFIRMED eligibility record
-    ties this message+company to the student. Callers suppress FORM/KYC/
-    REGISTRATION notifications, drafts, and reminders on 'not_found'.
+    ties this bundle+company to the student. Callers suppress SHORTLIST /
+    RESULT / OA / INTERVIEW / FORM / KYC / REGISTRATION notifications,
+    drafts, reminders, and escalations on 'not_found'.
     'no_list' = no candidate-list attachment — text-only path, unchanged.
     """
     if not message_id:
         return "no_list"
+    from pia_worker.bundles import resolve_bundle_message_ids
+
+    bundle_ids = resolve_bundle_message_ids(conn, message_id)
     payloads = conn.execute(
         sqlalchemy.text(
             "SELECT d.structured_payload FROM document_extractions d "
             "JOIN attachments a ON a.id = d.attachment_id "
-            "WHERE a.message_id = CAST(:msg AS uuid)"
+            "WHERE a.message_id = ANY(:msgs)"
         ),
-        {"msg": message_id},
+        {"msgs": bundle_ids},
     ).mappings().all()
     has_list = any(
         ((r["structured_payload"] or {}).get("detection") or {}).get(
@@ -225,11 +234,11 @@ def message_list_gate(
         hit = conn.execute(
             sqlalchemy.text(
                 "SELECT 1 FROM eligibility_records "
-                "WHERE source_message_id = CAST(:msg AS uuid) "
+                "WHERE source_message_id = ANY(:msgs) "
                 "AND company_id = CAST(:company AS uuid) "
                 "AND state IN ('ELIGIBLE', 'USER_CONFIRMED') LIMIT 1"
             ),
-            {"msg": message_id, "company": company_id},
+            {"msgs": bundle_ids, "company": company_id},
         ).first()
         if hit is not None:
             return "eligible"
@@ -237,10 +246,10 @@ def message_list_gate(
     any_hit = conn.execute(
         sqlalchemy.text(
             "SELECT 1 FROM eligibility_records "
-            "WHERE source_message_id = CAST(:msg AS uuid) "
+            "WHERE source_message_id = ANY(:msgs) "
             "AND state IN ('ELIGIBLE', 'USER_CONFIRMED') LIMIT 1"
         ),
-        {"msg": message_id},
+        {"msgs": bundle_ids},
     ).first()
     return "eligible" if any_hit is not None else "not_found"
 
@@ -249,27 +258,32 @@ def resolve_verification(
     conn: sqlalchemy.Connection, message_id: str | None,
     company_id: str | None,
 ) -> tuple[str, str]:
-    """Attachment verification for list-dependent decisions.
+    """Attachment verification for bundle-dependent decisions.
 
-    Returns (state, detail) with state in USER_PRESENT / USER_ABSENT /
-    NOT_AVAILABLE / PARSE_FAILED / NOT_RELEVANT. Strict rules:
+    Same bundle rule as message_list_gate: neighbours within the window share
+    attachments and match records. Returns (state, detail) with state in
+    USER_PRESENT / USER_ABSENT / NOT_AVAILABLE / PARSE_FAILED / NOT_RELEVANT.
+    Strict rules:
     - NOT_AVAILABLE is never reported as USER_ABSENT (missing file proves
       nothing — the caller must not conclude anything from it);
     - "no parsed rows" is PARSE_FAILED, never USER_ABSENT;
-    - no attachments, or attachments that are not candidate lists, is
-      NOT_RELEVANT (the message does not depend on a list).
+    - no attachments in the whole bundle, or attachments that are not
+      candidate lists, is NOT_RELEVANT (the bundle does not depend on a list).
     """
     from pia_worker.notify.context import AttachmentVerification
 
     if not message_id:
         return (AttachmentVerification.NOT_RELEVANT.value,
                 "no source message")
+    from pia_worker.bundles import resolve_bundle_message_ids
+
+    bundle_ids = resolve_bundle_message_ids(conn, message_id)
     attachments = conn.execute(
         sqlalchemy.text(
             "SELECT a.id, a.file_name, a.processing_state::text AS state "
-            "FROM attachments a WHERE message_id = CAST(:msg AS uuid)"
+            "FROM attachments a WHERE message_id = ANY(:msgs)"
         ),
-        {"msg": message_id},
+        {"msgs": bundle_ids},
     ).mappings().all()
     if not attachments:
         return (AttachmentVerification.NOT_RELEVANT.value,
@@ -278,9 +292,9 @@ def resolve_verification(
         sqlalchemy.text(
             "SELECT d.structured_payload, d.needs_review FROM document_extractions d "
             "JOIN attachments a ON a.id = d.attachment_id "
-            "WHERE a.message_id = CAST(:msg AS uuid)"
+            "WHERE a.message_id = ANY(:msgs)"
         ),
-        {"msg": message_id},
+        {"msgs": bundle_ids},
     ).mappings().all()
     lists = [r for r in extractions
              if ((r["structured_payload"] or {}).get("detection") or {}).get(
@@ -296,8 +310,8 @@ def resolve_verification(
                     "attachment download failed — status unverifiable")
         return (AttachmentVerification.NOT_AVAILABLE.value,
                 "attachment not yet processed — status unverifiable")
-    clauses = ["source_message_id = CAST(:msg AS uuid)"]
-    params: dict[str, object] = {"msg": message_id}
+    clauses = ["source_message_id = ANY(:msgs)"]
+    params: dict[str, object] = {"msgs": bundle_ids}
     if company_id:
         clauses.append("company_id = CAST(:company AS uuid)")
         params["company"] = company_id

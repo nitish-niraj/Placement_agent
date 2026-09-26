@@ -132,6 +132,9 @@ class Settings(BaseSettings):
     digest_hour: int = 20  # 20:30 Asia/Kolkata default (TRD §8)
     digest_minute: int = 30
     notify_send_attempts: int = 3  # RQ retries before PENDING_DELIVERY
+    # Split-message bundling: image/excel first + text after (or vice versa)
+    # in the same group within this window are ONE entity for list gating.
+    bundle_window_minutes: int = 10
     # master §11 policy flags (wire-up completed in the fixed-code backlog)
     notify_critical_immediately: bool = True
     notify_medium_in_digest: bool = True
