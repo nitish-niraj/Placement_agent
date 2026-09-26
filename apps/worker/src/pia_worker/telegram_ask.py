@@ -42,8 +42,46 @@ _HELP_TEXT = (
     "Examples:\n"
     "• which companies am I eligible for?\n"
     "• what is the TECHADEMY package and role?\n"
-    "• which was the latest company I was eligible for?"
+    "• which was the latest company I was eligible for?\n"
+    "Commands:\n"
+    "• /status — your tracked applications with re-tappable answer buttons."
 )
+
+
+def _send_status_list(client: httpx.Client, token: str, chat_id: str) -> None:
+    """Persistent /status command: newest opportunities with fresh answer
+    keyboards, so an answer can be changed after the original buttons were
+    cleared. Owner-gated by the caller; failures get a plain retry line."""
+    from pia_worker.applications import records as app_records
+    from pia_worker.db import engine_for_current_host
+    from pia_worker.notify.buttons import ask_applied_keyboard
+    from pia_worker.notify.records import get_user_id
+
+    try:
+        engine = engine_for_current_host()
+        with engine.connect() as conn:
+            user_id = get_user_id(conn)
+            rows = app_records.list_recent_applications(conn, user_id, limit=8)
+    except Exception as exc:  # noqa: BLE001 — one bad lookup never kills poll
+        logger.error("telegram_status_failed", error=str(exc)[:180])
+        _send(client, token, chat_id,
+              "Couldn't load your applications — please try again.")
+        return
+    if not rows:
+        _send(client, token, chat_id,
+              "No tracked applications yet — you'll get an Application check "
+              "with buttons when the first application-related update arrives.")
+        return
+    for row in rows:
+        company = str(row.get("company") or "Unknown company")
+        role = str(row.get("role_normalized") or "")
+        status = str(row.get("status") or "UNKNOWN")
+        title = company + (f" / {role}" if role else "")
+        _send(client, token, chat_id,
+              f"📋 <b>{html.escape(title)}</b>\n"
+              f"Current answer: <b>{html.escape(status)}</b>\n"
+              "Tap to change it:",
+              reply_markup=ask_applied_keyboard(str(row["id"])))
 
 
 @dataclass
@@ -203,7 +241,10 @@ def _handle_update(client: httpx.Client, token: str, owner_chat_id: str,
         logger.warning("telegram_ask_foreign_chat_ignored", chat_id=chat_id)
         return
     if text.startswith("/"):
-        _send(client, token, chat_id, _HELP_TEXT)
+        if text.split()[0].lower() == "/status":
+            _send_status_list(client, token, chat_id)
+        else:
+            _send(client, token, chat_id, _HELP_TEXT)
         return
     if len(text) < 3:
         _send(client, token, chat_id, _HELP_TEXT)

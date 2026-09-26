@@ -232,6 +232,73 @@ class TestGating:
         assert any(m == "sendMessage" for m, _ in recorder)
 
 
+class TestStatusCommand:
+    def _wire(self, monkeypatch, rows: list[dict]):
+        import contextlib
+
+        import pia_worker.db as db
+
+        class _Conn:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def execute(self, sql, params=None):
+                _ = (sql, params)
+
+                class _R:
+                    def __init__(self, rows):
+                        self._rows = rows
+
+                    def mappings(self):
+                        return self
+
+                    def all(self):
+                        return list(self._rows)
+
+                return _R(self._rows)
+
+        class _Engine:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def connect(self):
+                return contextlib.nullcontext(_Conn(self._rows))
+
+        monkeypatch.setattr(db, "engine_for_current_host",
+                            lambda: _Engine(rows))
+        import pia_worker.notify.records as notify_records
+        monkeypatch.setattr(notify_records, "get_user_id", lambda conn: "u")
+
+    def test_status_lists_with_fresh_buttons(
+            self, monkeypatch) -> None:
+        self._wire(monkeypatch, [
+            {"id": APP_UUID, "company": "Venlnexaa", "role_normalized": "",
+             "status": "NOT_APPLIED"}])
+        recorder: list = []
+        ta._handle_update(_recording_client(recorder), "tok", OWNER,
+                          _update(3, OWNER, "/status"), _answer_fn())
+        sends = _sends(recorder)
+        assert len(sends) == 1
+        assert "Venlnexaa" in sends[0][1]["text"]
+        assert "NOT_APPLIED" in sends[0][1]["text"]
+        keyboard = sends[0][1]["reply_markup"]["inline_keyboard"]
+        flat = [b for row in keyboard for b in row]
+        assert flat[0]["callback_data"] == f"app:{APP_UUID}:APPLIED"
+
+    def test_status_empty_is_helpful(self, monkeypatch) -> None:
+        self._wire(monkeypatch, [])
+        recorder: list = []
+        ta._handle_update(_recording_client(recorder), "tok", OWNER,
+                          _update(3, OWNER, "/status"), _answer_fn())
+        assert "No tracked applications" in _sends(recorder)[0][1]["text"]
+
+    def test_unknown_slash_still_shows_help(self, monkeypatch) -> None:
+        recorder: list = []
+        ta._handle_update(_recording_client(recorder), "tok", OWNER,
+                          _update(3, OWNER, "/bogus"), _answer_fn())
+        assert "Ask PIA" in _sends(recorder)[0][1]["text"]
+
+
 APP_UUID = "12345678-1234-1234-1234-1234567890ab"
 
 

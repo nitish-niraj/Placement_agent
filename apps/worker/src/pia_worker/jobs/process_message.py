@@ -62,7 +62,8 @@ def process_message(message_id: str, correlation_id: str = "") -> str:
     with engine.begin() as conn:
         row = conn.execute(
             sqlalchemy.text(
-                "SELECT m.processing_state, m.text, g.category, g.enabled "
+                "SELECT m.processing_state, m.text, m.text_source, m.has_media, "
+                "g.category, g.enabled "
                 "FROM messages m JOIN groups g ON g.id = m.group_id "
                 "WHERE m.id = CAST(:id AS uuid)"
             ),
@@ -120,6 +121,15 @@ def process_message(message_id: str, correlation_id: str = "") -> str:
                 classification_payload = {"status": "error", "error": str(exc)[:200]}
                 logger.warning("classification_error", message_id=message_id,
                                error=str(exc)[:200])
+
+        # Provenance stamp (audit-only): caption vs body + media presence ride
+        # the classification JSONB so dashboards/Ask can show [caption] without
+        # changing any evaluation input (all stages still read messages.text).
+        try:
+            classification_payload["text_source"] = row.text_source
+            classification_payload["has_media"] = bool(row.has_media)
+        except Exception:  # noqa: BLE001 — stamp never blocks persistence
+            pass
 
         conn.execute(
             sqlalchemy.text(

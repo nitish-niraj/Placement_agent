@@ -54,12 +54,18 @@ def extract_topic_token(text: str) -> str | None:
 def identify_subject(
     conn: sqlalchemy.Connection, *, text: str,
     company_id: str | None = None, canonical: str | None = None,
-    file_name: str | None = None,
+    file_name: str | None = None, borrowed: bool = False,
 ) -> Subject:
     """Resolve the display subject. `company_id`/`canonical` come from the
     existing mention/drive-code path; `file_name` from the message's first
-    attachment. Only links — never creates — company rows."""
+    attachment. Only links — never creates — company rows. `borrowed=True`
+    marks a company inherited from a bundle neighbor (confidence capped,
+    evidence tagged) so it never outranks a direct signal downstream."""
     if company_id and canonical:
+        if borrowed:
+            return Subject(display=canonical, company_id=company_id,
+                           is_company=True, confidence=0.4,
+                           evidence="bundle_neighbor")
         return Subject(display=canonical, company_id=company_id,
                        is_company=True, confidence=1.0,
                        evidence="resolved_mention")

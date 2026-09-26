@@ -192,6 +192,24 @@ def list_applications_for_company(
     return [dict(r) for r in rows]
 
 
+def list_recent_applications(
+    conn: sqlalchemy.Connection, user_id: str, limit: int = 10,
+) -> list[dict]:
+    """Newest opportunity rows with company names — the /status listing."""
+    rows = conn.execute(
+        sqlalchemy.text(
+            "SELECT s.id, s.role_normalized, s.opportunity_key, s.status, "
+            "s.applied_at, s.source, s.note, s.updated_at, "
+            "c.canonical_name AS company FROM application_states s "
+            "JOIN companies c ON c.id = s.company_id "
+            "WHERE s.user_id = CAST(:user AS uuid) "
+            "ORDER BY s.updated_at DESC LIMIT :lim"
+        ),
+        {"user": user_id, "lim": max(1, min(limit, 25))},
+    ).mappings().all()
+    return [dict(r) for r in rows]
+
+
 def message_list_gate(
     conn: sqlalchemy.Connection, message_id: str | None,
     company_id: str | None,

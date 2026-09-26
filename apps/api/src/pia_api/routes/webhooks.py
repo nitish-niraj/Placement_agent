@@ -25,7 +25,8 @@ from sqlalchemy import text
 from pia_api.db import get_engine
 from pia_api.normalization import (
     content_hash,
-    extract_text,
+    extract_reply,
+    extract_text_with_source,
     map_connection_state,
     parse_timestamp,
 )
@@ -250,7 +251,8 @@ def _handle_message_upsert(
         return "ignored", None, None, jid  # missing identity fields (FR-MSG-001 contract)
 
     message_body = item.get("message") or {}
-    text_value = extract_text(message_body)
+    text_value, text_source = extract_text_with_source(message_body)
+    reply = extract_reply(message_body)
     message_type = str(item.get("messageType") or "unknown")
     sent_at = parse_timestamp(item.get("messageTimestamp"))
     settings = get_settings()
@@ -282,9 +284,12 @@ def _handle_message_upsert(
         inserted = conn.execute(
             text(
                 "INSERT INTO messages (provider_message_id, group_id, sender_id, "
-                "sender_name, sent_at, text, content_hash, image_phash, "
+                "sender_name, sent_at, text, text_source, has_media, "
+                "reply_to_provider_message_id, reply_to_sender_id, "
+                "reply_quoted_text, content_hash, image_phash, "
                 "processing_state, correlation_id, retention_expires_at) "
-                "VALUES (:pid, :gid, :sender, :sender_name, :sent_at, :txt, :chash, "
+                "VALUES (:pid, :gid, :sender, :sender_name, :sent_at, :txt, "
+                ":tsource, :hasmedia, :rstanza, :rsender, :rquote, :chash, "
                 ":phash, CAST('RECEIVED' AS message_state), :corr, :retention) "
                 "ON CONFLICT (provider_message_id, group_id) DO NOTHING RETURNING id"
             ),
@@ -295,6 +300,11 @@ def _handle_message_upsert(
                 "sender_name": item.get("pushName"),
                 "sent_at": sent_at,
                 "txt": text_value,
+                "tsource": text_source,
+                "hasmedia": media is not None,
+                "rstanza": (reply or {}).get("stanza_id"),
+                "rsender": (reply or {}).get("participant"),
+                "rquote": (reply or {}).get("quoted_text"),
                 "chash": chash_value,
                 "phash": phash_hex,
                 "corr": correlation_id,
@@ -305,6 +315,30 @@ def _handle_message_upsert(
 
         if inserted is None:
             return "duplicate", None, None, jid  # FR-MSG-002: same event -> one logical message
+
+        # Reply edge: link to the quoted parent when it already exists
+        # (same group scope — stanza ids are not globally unique). Late
+        # parents backfill on their own insert below.
+        if reply and reply.get("stanza_id"):
+            conn.execute(
+                text(
+                    "UPDATE messages SET reply_to_message_id = "
+                    "(SELECT p.id FROM messages p WHERE p.provider_message_id = "
+                    ":stanza AND p.group_id = :gid LIMIT 1) "
+                    "WHERE id = :mid"
+                ),
+                {"stanza": reply["stanza_id"], "gid": group_row.id,
+                 "mid": inserted.id},
+            )
+            conn.execute(
+                text(
+                    "UPDATE messages SET reply_to_message_id = :mid "
+                    "WHERE group_id = :gid AND reply_to_message_id IS NULL "
+                    "AND reply_to_provider_message_id = :pid"
+                ),
+                {"mid": inserted.id, "gid": group_row.id,
+                 "pid": provider_message_id},
+            )
 
         # P9 dedup cascade (exact -> visual -> near) BEFORE any enrichment
         # fan-out: suppressed copies are persisted + audited but never

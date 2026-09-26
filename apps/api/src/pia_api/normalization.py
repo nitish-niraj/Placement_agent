@@ -11,27 +11,84 @@ from pia_shared.enums import InstanceStatus
 
 _WS = re.compile(r"\s+")
 
-_TEXT_SOURCES = (
-    "conversation",
-    "extendedTextMessage.text",
-    "imageMessage.caption",
-    "videoMessage.caption",
-    "documentMessage.caption",
-    "documentWithCaptionMessage.message.documentMessage.caption",
+# Text body sources across common Evolution message shapes (first hit wins).
+# text_source provenance labels each hit (audit-only; evaluation reads
+# messages.text unchanged). Replies keep the BODY source — quoted text is
+# tracked separately via extract_reply, never merged.
+_TEXT_SOURCE_LABELS = (
+    ("conversation", "conversation"),
+    ("extendedTextMessage.text", "extended_text"),
+    ("imageMessage.caption", "image_caption"),
+    ("videoMessage.caption", "video_caption"),
+    ("documentMessage.caption", "document_caption"),
+    ("documentWithCaptionMessage.message.documentMessage.caption",
+     "document_caption"),
 )
+
+# Typed message objects that can carry a WhatsApp reply (contextInfo).
+# Evolution mirrors WA shape: *.contextInfo{stanzaId, participant,
+# quotedMessage}. quotedMessage re-uses normal shapes (conversation/text/caption).
+_REPLY_CARRIERS = (
+    "extendedTextMessage",
+    "imageMessage",
+    "videoMessage",
+    "documentMessage",
+)
+
+
+def _walk(message: object, path: str) -> object:
+    value: object = message
+    for part in path.split("."):
+        if not isinstance(value, dict):
+            return None
+        value = value.get(part)
+    return value
 
 
 def extract_text(message: dict) -> str | None:
     """First available text body across common Evolution message shapes; None if none."""
-    for path in _TEXT_SOURCES:
-        value: object = message
-        for part in path.split("."):
-            if not isinstance(value, dict):
-                value = None
-                break
-            value = value.get(part)
+    text, _ = extract_text_with_source(message)
+    return text
+
+
+def extract_text_with_source(message: dict) -> tuple[str | None, str | None]:
+    """(text, text_source). Source labels the winning body path; None source
+    for media-only/empty messages. Reply contextInfo is ignored here — see
+    extract_reply."""
+    for path, label in _TEXT_SOURCE_LABELS:
+        value = _walk(message, path)
         if isinstance(value, str) and value.strip():
-            return value
+            return value, label
+    return None, None
+
+
+def extract_reply(message: dict) -> dict | None:
+    """Reply/quote edge from a WhatsApp message, or None when not a reply.
+
+    Returns {stanza_id, participant, quoted_text}: stanza_id is the quoted
+    message's provider id (joins messages.provider_message_id within the same
+    group), participant its sender, quoted_text a ≤300-char audit snippet
+    (reuses extract_text on the quoted payload — never classified separately).
+    """
+    for carrier in _REPLY_CARRIERS:
+        node = _walk(message, carrier)
+        if not isinstance(node, dict):
+            continue
+        context = node.get("contextInfo")
+        if not isinstance(context, dict):
+            continue
+        stanza_id = context.get("stanzaId")
+        if not isinstance(stanza_id, str) or not stanza_id.strip():
+            continue
+        participant = context.get("participant")
+        quoted = context.get("quotedMessage")
+        quoted_text = extract_text(quoted) if isinstance(quoted, dict) else None
+        return {
+            "stanza_id": stanza_id.strip(),
+            "participant": (participant.strip() if isinstance(participant, str)
+                            and participant.strip() else None),
+            "quoted_text": (quoted_text[:300] if quoted_text else None),
+        }
     return None
 
 

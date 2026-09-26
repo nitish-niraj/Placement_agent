@@ -40,6 +40,12 @@ _MAX_TRACKED = 500
 _TAIL_CHARS = 300
 _EVOLUTION_TIMEOUT_SECONDS = 10.0
 
+# Student-note dedup: both worker services run this hourly scan, and a stale
+# condition persists across scans — without an anchor the student gets the
+# same note 2x/hour until recovery. One anchor per note-type per hour bucket.
+_NOTE_ANCHOR_PREFIX = "pia:watchdog:note:"
+_NOTE_ANCHOR_TTL_SECONDS = 7200
+
 _STUDENT_HEARTBEAT_NOTE = (
     "⚠️ Placement alerts may be delayed — the background worker looks stale. "
     "Your data is safe; this usually resolves on its own.")
@@ -108,6 +114,21 @@ def _store_seen(client, ids: set[str]) -> None:
         client.set(_STATE_KEY, json.dumps(sorted(ids)[-_MAX_TRACKED:]))
     except Exception:  # noqa: BLE001 — best-effort bookkeeping
         logger.warning("watchdog_state_unstored")
+
+
+def _note_already_sent(client, kind: str) -> bool:
+    """Hour-bucketed student-note anchor (SET NX). True = skip sending:
+    another scan already paged this note-type this hour (dual maintenance
+    runners + persistent stale conditions used to double-send hourly)."""
+    import datetime as dt
+
+    bucket = dt.datetime.now(dt.UTC).strftime("%Y%m%d%H")
+    try:
+        return not bool(client.set(
+            f"{_NOTE_ANCHOR_PREFIX}{kind}:{bucket}", "1",
+            nx=True, ex=_NOTE_ANCHOR_TTL_SECONDS))
+    except Exception:  # noqa: BLE001 — redis blip: send once, never suppress
+        return False
 
 
 def _summarize(new_failures: list[dict]) -> str:
@@ -247,11 +268,11 @@ def scan_failed_jobs() -> dict:
         if sections and (admin_chat or debug):
             _telegram_send(text="\n".join(sections),
                            chat_id=admin_chat or None)
-        if heartbeat_stale:
+        if heartbeat_stale and not _note_already_sent(client, "worker"):
             _telegram_send(text=_STUDENT_HEARTBEAT_NOTE)
-        if ask_stale:
+        if ask_stale and not _note_already_sent(client, "ask"):
             _telegram_send(text=_ASK_STALE_NOTE)
-        if evolution_down:
+        if evolution_down and not _note_already_sent(client, "evo"):
             _telegram_send(
                 text="⚠️ Placement updates are paused — the WhatsApp "
                      "connection dropped. Your data is safe; alerts resume "

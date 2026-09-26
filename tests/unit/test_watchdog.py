@@ -47,8 +47,16 @@ class FakeRedis:
             raise ConnectionError("redis down")
         return self.store.get(key)
 
-    def set(self, key, value):
-        self.store[key] = value if isinstance(value, str) else value.decode()
+    def set(self, key, value, nx=False, ex=None):
+        if isinstance(value, bytes):
+            value = value.decode()
+        elif not isinstance(value, str):
+            value = str(value)
+        if nx and key in self.store:
+            return None
+        self.store[key] = value
+        _ = ex
+        return True
 
 
 JOBS = [FakeJob("a", "pia_worker.jobs.process_message.download_attachment"),
@@ -175,6 +183,46 @@ class TestWatchdog:
         assert len(sent) == 1
         assert "may be delayed" in sent[0]["text"]
         assert "Traceback" not in sent[0]["text"]
+
+
+class TestStudentNoteDedup:
+    """Dual maintenance runners + persistent stale conditions used to send
+    the same student note 2x/hour. One anchor per note-type per hour."""
+
+    def _stale_ask(self, monkeypatch):
+        import datetime as dt
+
+        redis, sent = _wire(monkeypatch, [], seen=[])
+        redis.store[wd._ASK_HEARTBEAT_KEY] = (
+            dt.datetime.now(dt.UTC) - dt.timedelta(hours=2)).isoformat()
+        return redis, sent
+
+    def test_second_scan_same_hour_is_quiet(self, monkeypatch) -> None:
+        _, sent = self._stale_ask(monkeypatch)
+        assert wd.scan_failed_jobs()["ask_stale"] is True
+        assert len(_student_texts(sent)) == 1
+        sent.clear()
+        assert wd.scan_failed_jobs()["ask_stale"] is True
+        assert _student_texts(sent) == []  # anchored — no double-send
+
+    def test_anchor_is_per_note_type(self, monkeypatch) -> None:
+        import datetime as dt
+
+        redis, sent = self._stale_ask(monkeypatch)
+        redis.store["pia:worker:heartbeat"] = (
+            dt.datetime.now(dt.UTC) - dt.timedelta(hours=2)).isoformat()
+        wd.scan_failed_jobs()
+        texts = _student_texts(sent)
+        assert len(texts) == 2  # worker note + ask note, one each
+        assert any("may be delayed" in t for t in texts)
+        assert any("slow to answer" in t for t in texts)
+
+    def test_anchor_fail_open_on_redis_blip(self) -> None:
+        class _Broken:
+            def set(self, *a, **k):
+                raise ConnectionError("redis down")
+
+        assert wd._note_already_sent(_Broken(), "ask") is False
 
     def test_admin_channel_gets_full_detail(
             self, monkeypatch) -> None:

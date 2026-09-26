@@ -85,7 +85,8 @@ def find_existing_record(conn: sqlalchemy.Connection, extraction_id: str) -> str
     return str(row.id) if row is not None else None
 
 
-def _evidence_payload(outcome: ListOutcome, thresholds: Any) -> dict[str, Any]:
+def _evidence_payload(outcome: ListOutcome, thresholds: Any,
+                      company_provenance: str = "direct") -> dict[str, Any]:
     """Auditable evidence bundle (SEC-009): observed row refs + the deterministic
     rationale + the evaluation context. Never contains LLM output."""
     return {
@@ -94,6 +95,7 @@ def _evidence_payload(outcome: ListOutcome, thresholds: Any) -> dict[str, Any]:
         "rows_evaluated": len(outcome.row_results),
         "rows_cited": len(outcome.evidence),
         "thresholds": {"fuzzy": thresholds.fuzzy, "ambiguous": thresholds.ambiguous},
+        "company_provenance": company_provenance,
     }
 
 
@@ -106,6 +108,7 @@ def persist_outcome(
     company_id: str,
     outcome: ListOutcome,
     thresholds: Any,
+    company_provenance: str = "direct",
 ) -> str:
     """Insert the eligibility record walking §10.2 from UNKNOWN; every step is
     asserted (InvalidTransitionError would abort the transaction) and audited."""
@@ -117,7 +120,13 @@ def persist_outcome(
         state_chain.append(EligibilityState.ELIGIBLE)
     final_state = state_chain[-1]
 
-    if final_state is EligibilityState.ELIGIBLE:
+    if final_state is EligibilityState.ELIGIBLE and company_provenance != "direct":
+        # Borrowed (bundle-neighbor) company: the record still gates its own
+        # bundle, but a borrowed attribution must never activate the
+        # company-wide watch (it would boost unrelated future events).
+        logger.info("watch_skipped_borrowed_company", company_id=company_id,
+                    provenance=company_provenance)
+    if final_state is EligibilityState.ELIGIBLE and company_provenance == "direct":
         # F-018 / FR-MEM-005: eligibility activates the company watch and
         # advances the lifecycle — same transaction, so the record and the
         # watch state are always consistent.
@@ -145,7 +154,9 @@ def persist_outcome(
             "review": outcome.requires_user_review,
             "message": message_id,
             "extraction": extraction_id,
-            "evidence": json.dumps(_evidence_payload(outcome, thresholds), default=str),
+            "evidence": json.dumps(
+                _evidence_payload(outcome, thresholds, company_provenance),
+                default=str),
         },
     ).scalar_one())
 
@@ -163,6 +174,7 @@ def persist_outcome(
                 "match_method": outcome.match_method.value if outcome.match_method else None,
                 "confidence": outcome.confidence,
                 "rationale": outcome.rationale,
+                "company_provenance": company_provenance,
             }, default=str),
         },
     )

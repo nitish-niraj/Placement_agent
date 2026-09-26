@@ -7,6 +7,7 @@ ungated types. No DB, no Redis, no network.
 """
 
 import contextlib
+from collections.abc import Callable
 from types import SimpleNamespace
 
 import pytest
@@ -284,3 +285,79 @@ class TestNotifyDeferral:
                 AssertionError("must not consult budget on failed download")))
         assert nt.notify_event("event-uuid") != "deferred"
         _ = conn
+
+
+def _neighbor_script(event: dict, extraction_payloads) -> Callable:
+    """Text-only anchor (no own attachments) + neighbor message in the same
+    bundle window carrying the candidate list — the user's check-before/after
+    rule: the neighbor file must gate the anchor's SHORTLIST."""
+
+    def script(sql: str, params: dict | None = None) -> FakeResult:
+        if "FROM events e" in sql:
+            return FakeResult(mapping=event)
+        if "SELECT group_id, sent_at FROM messages" in sql:
+            return FakeResult(mapping={"group_id": "g", "sent_at": "t"})
+        if "SELECT id FROM messages" in sql:
+            return FakeResult(mapping_list=[{"id": "m-text"},
+                                            {"id": "m-img"}])
+        if "SELECT reply_to_message_id FROM messages" in sql:
+            return FakeResult(mapping=None)
+        if "FROM attachments" in sql:
+            return FakeResult(mapping_list=[
+                {"id": "att-uuid", "file_name": "shortlist.png",
+                 "state": "PROCESSED"}])
+        if "FROM document_extractions" in sql:
+            return FakeResult(mapping_list=extraction_payloads)
+        if "FROM eligibility_records" in sql:
+            return FakeResult(mapping=None)  # user absent from neighbor list
+        if "SELECT id FROM users" in sql:
+            return FakeResult(mapping=SimpleNamespace(id="user-uuid"))
+        if "FROM application_states" in sql:
+            return FakeResult(mapping=None)
+        if "INSERT INTO application_states" in sql:
+            return FakeResult(mapping=_app_row("UNKNOWN"))
+        if "INSERT INTO notifications" in sql:
+            return FakeResult(mapping=SimpleNamespace(id="notif-uuid"))
+        return FakeResult()
+    return script
+
+
+class TestNeighborFileCheck:
+    """Text-only SHORTLIST anchor: a settled neighbor list without the
+    student suppresses; a pending neighbor list defers; no neighbor file
+    at all notifies normally."""
+
+    def _run(self, monkeypatch: pytest.MonkeyPatch, extraction_payloads,
+             defer_count: int = 0) -> tuple[FakeConn, list]:
+        event = _event("SHORTLIST",
+                       "You have been shortlisted for the next round. "
+                       "Report tomorrow at 9 AM.")
+        event["current_payload"]["source_message_id"] = "m-text"
+        conn = FakeConn(_neighbor_script(event, extraction_payloads))
+        monkeypatch.setattr(nt, "_engine", lambda: FakeEngine(conn))
+        monkeypatch.setattr(nt, "_enqueue_send", lambda nid: "queued")
+        monkeypatch.setattr(nt, "_defer_count", lambda eid: defer_count)
+        requeued: list = []
+        monkeypatch.setattr(
+            nt, "_requeue_notify_delayed",
+            lambda eid, outcome, minutes: requeued.append(
+                (eid, outcome, minutes)))
+        return conn, requeued
+
+    def test_neighbor_list_without_me_suppresses_anchor(
+            self, monkeypatch: pytest.MonkeyPatch) -> None:
+        conn, requeued = self._run(monkeypatch, _list_payload(),
+                                   defer_count=nt.NOTIFY_DEFER_MAX_ATTEMPTS)
+        assert nt.notify_event("event-uuid") == "suppressed_list"
+        assert requeued == []
+        ins = [p for sql, p in conn.executed
+               if "INSERT INTO notifications" in sql and p]
+        assert ins[0]["status"] == "SUPPRESSED"
+
+    def test_pending_neighbor_list_defers_anchor(
+            self, monkeypatch: pytest.MonkeyPatch) -> None:
+        conn, requeued = self._run(monkeypatch, [], defer_count=0)
+        assert nt.notify_event("event-uuid") == "deferred"
+        assert requeued == [("event-uuid", "created", nt.NOTIFY_DEFER_MINUTES)]
+        assert not any("INSERT INTO notifications" in sql
+                       for sql, _ in conn.executed)

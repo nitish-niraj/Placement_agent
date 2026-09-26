@@ -79,11 +79,19 @@ def extract_events(message_id: str) -> str:
     company_id = str(resolved[0]["id"]) if resolved else None
     company_key: str | None = None
     company_name: str | None = None
+    company_borrowed = False
     if resolved:
         company_name = str(resolved[0]["canonical"])
         company_key = normalize_name(company_name)
     else:
-        text_company = rules.extract_company_from_text(bundle_text_value)
+        # Anchor-first: a drive code in THIS message is a direct signal.
+        # Bundle text is only a borrowed fallback (the neighbor's company) —
+        # it still resolves the row, but is recorded as borrowed and never
+        # outranks a direct signal downstream (no borrowed watch activation).
+        text_company = rules.extract_company_from_text(text)
+        if text_company is None and bundle_text_value != text:
+            text_company = rules.extract_company_from_text(bundle_text_value)
+            company_borrowed = text_company is not None
         if text_company:
             with engine.begin() as conn:
                 # Drive codes are authoritative: mint the row when needed.
@@ -111,6 +119,7 @@ def extract_events(message_id: str) -> str:
             canonical=company_name,
             file_name=str(file_row.file_name)
             if file_row is not None and file_row.file_name else None,
+            borrowed=company_borrowed,
         )
         logger.info("event_subject_identified", message_id=message_id,
                     display=subject.display, evidence=subject.evidence,

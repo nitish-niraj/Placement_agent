@@ -11,6 +11,7 @@ Contract (TRD §4.1):
 
 import datetime as dt
 import json
+import random
 import re
 import time
 import uuid
@@ -27,6 +28,21 @@ logger = structlog.get_logger()
 T = TypeVar("T", bound=BaseModel)
 
 _THINK = re.compile(r"<think>.*?</think>", flags=re.S)
+
+# Transient free-tier failures worth an extra sleep+retry WITHOUT consuming
+# the single validation-repair attempt (TRD §4.1): 429/5xx + transport blips.
+# JSONDecodeError and schema failures are NOT transient (same retry would fail).
+_TRANSIENT_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
+_TRANSIENT_SLEEPS = (2.0, 8.0)  # seconds, plus up to 1s jitter each
+
+
+def _transient_error(exc: Exception) -> bool:
+    """True when retrying the identical request may succeed (server/transport
+    blip rather than a bad request or bad payload)."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code if exc.response is not None else 0
+        return status in _TRANSIENT_STATUS
+    return isinstance(exc, httpx.HTTPError)  # transport-level: timeout/DNS/reset
 
 
 class ProviderError(RuntimeError):
@@ -180,21 +196,40 @@ class NIMProvider:
         usage = Usage(prompt_tokens=0, completion_tokens=0, latency_ms=0,
                       validation="invalid", call_id=str(uuid.uuid4()))
         last_error: Exception | None = None
+        transient_used = 0
 
         for attempt in (1, 2):  # one repair retry (TRD §4.1)
-            t0 = time.monotonic()
-            try:
-                response = self._client.post(
-                    "/chat/completions",
-                    json={"model": self._model, "messages": messages,
-                          "temperature": 0.1, "max_tokens": max_tokens},
-                )
-                response.raise_for_status()
-                body = response.json()
-            except (httpx.HTTPError, json.JSONDecodeError) as exc:
-                last_error = exc
-                _log_ai_call(correlation_id, task, self._model, usage)
-                continue
+            # Transient 429/5xx/transport blips retry the SAME attempt (with
+            # sleep) without consuming the validation-repair budget.
+            body: dict[str, Any] | None = None
+            while True:
+                t0 = time.monotonic()
+                try:
+                    response = self._client.post(
+                        "/chat/completions",
+                        json={"model": self._model, "messages": messages,
+                              "temperature": 0.1, "max_tokens": max_tokens},
+                    )
+                    response.raise_for_status()
+                    body = response.json()
+                except (httpx.HTTPError, json.JSONDecodeError) as exc:
+                    last_error = exc
+                    _log_ai_call(correlation_id, task, self._model, usage)
+                    if (isinstance(exc, httpx.HTTPError)
+                            and _transient_error(exc)
+                            and transient_used < len(_TRANSIENT_SLEEPS)):
+                        delay = (_TRANSIENT_SLEEPS[transient_used]
+                                 + random.uniform(0, 1.0))
+                        transient_used += 1
+                        logger.info("llm_transient_retry", task=task,
+                                    attempt=attempt, delay_s=round(delay, 1),
+                                    error=str(exc)[:120])
+                        time.sleep(delay)
+                        continue
+                    break
+                break
+            if body is None:
+                continue  # transport/schema failure consumed this attempt
 
             choice = body["choices"][0]["message"]["content"]
             usage.prompt_tokens = body.get("usage", {}).get("prompt_tokens", 0)

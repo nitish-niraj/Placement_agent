@@ -90,6 +90,7 @@ def run_eligibility_match(extraction_id: str) -> str:
         )
 
     company_name = collapse_ws(detection.get("company") or "")
+    company_provenance = "direct"
     if not company_name:
         # Bundle fallback: image-only lists carry no company header and the
         # file is image.jpg — resolve from neighbouring announcement text
@@ -108,6 +109,7 @@ def run_eligibility_match(extraction_id: str) -> str:
                 company_name = collapse_ws(
                     extract_company_from_text(combined) or "")
                 if company_name:
+                    company_provenance = "bundle_borrowed"
                     logger.info("eligibility_company_from_bundle",
                                 extraction_id=extraction_id,
                                 company=company_name)
@@ -132,6 +134,7 @@ def run_eligibility_match(extraction_id: str) -> str:
             company_id=company_id,
             outcome=outcome,
             thresholds=thresholds,
+            company_provenance=company_provenance,
         )
 
     if outcome.state.value == "ELIGIBLE":

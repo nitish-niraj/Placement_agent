@@ -55,6 +55,14 @@ def test_resolved_company_wins() -> None:
         "Accenture", True, 1.0, "resolved_mention")
 
 
+def test_borrowed_company_capped_and_tagged() -> None:
+    s = subj.identify_subject(FakeConn(), text="neighbor text",
+                              company_id="c-1", canonical="Emicon",
+                              borrowed=True)
+    assert s.display == "Emicon" and s.is_company
+    assert s.confidence == 0.4 and s.evidence == "bundle_neighbor"
+
+
 def test_topic_token_for_mars() -> None:
     assert subj.extract_topic_token(
         "List of the defaulters who are yet not registered on the "

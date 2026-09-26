@@ -225,7 +225,8 @@ def list_messages(limit: int = 100, important_only: bool = True,
     with engine.connect() as conn:
         rows = conn.execute(
             sqlalchemy.text(
-                "SELECT m.id, m.text, m.domain, m.importance, m.sent_at, "
+                "SELECT m.id, m.text, m.text_source, m.has_media, m.domain, "
+                "m.importance, m.sent_at, "
                 "m.processing_state, m.classification->>'status' AS dedup_status, "
                 "g.name AS group_name FROM messages m "
                 "JOIN groups g ON g.id = m.group_id "

@@ -135,6 +135,7 @@ def test_image_vision_unavailable_falls_back_to_review(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("pia_worker.ai.provider._log_ai_call", lambda *a, **k: None)
+    monkeypatch.setattr("pia_worker.ai.provider.time.sleep", lambda s: None)
     provider = NIMProvider(client=httpx.Client(
         transport=httpx.MockTransport(lambda req: httpx.Response(500, json={})),
         base_url="http://test"))
